@@ -35,7 +35,7 @@ git clone -b melodic-devel --single-branch https://github.com/rise-lab-skku/rise
 
 Recommanded: Use virtual environment and activate it.
 ```
-cd gqcnn
+cd rise-gqcnn
 virtualenv -p python3.6 --system-site-packages venv
 source venv/bin/activate
 ```

@@ -30,7 +30,7 @@ If you use any part of this code in a publication, please cite [the appropriate 
 ## Installation
 Download code on your *catkin_ws*.
 ```bash
-git clone ...
+git clone -b melodic-devel --single-branch https://github.com/rise-lab-skku/rise-gqcnn.git
 ```
 
 Recommanded: Use virtual environment and activate it.

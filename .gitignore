@@ -90,3 +90,7 @@ ENV/
 *~
 .#*
 #*
+
+# Added by RISE(Author: Sungwon Seo)
+models/
+.vscode

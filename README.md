@@ -25,3 +25,52 @@ Please see the [docs](https://berkeleyautomation.github.io/gqcnn/) for installat
 ## Citation
 If you use any part of this code in a publication, please cite [the appropriate Dex-Net publication](https://berkeleyautomation.github.io/gqcnn/index.html#academic-use).
 
+# Guide for RISE members
+> (WARNING) Download pre-trained model from our synology. Please see details on bellow information. 
+## Installation
+Download code on your *catkin_ws*.
+```bash
+git clone ...
+```
+
+Recommanded: Use virtual environment and activate it.
+```
+cd gqcnn
+virtualenv -p python3.6 --system-site-packages venv
+source venv/bin/activate
+```
+
+Change directories into the *gqcnn* repository and run the pip installation.
+```bash
+pip install .
+```
+
+## Download pre-trained models from our synology
+> (WARNING) Official download link is broken. Please follow the bellow intruction.
+
+Create directory in the *gqcnn* repository.
+```bash
+mkdir -p models
+```
+Download pre-trained models on *models* directory. The models can be found on our synology `/Research Projects/2020_지능증강/NN_models/official-gqcnn-models`.
+
+Unzip pre-trained models.
+```bash
+cd models
+unzip -a GQCNN-4.0-PJ.zip
+unzip -a GQCNN-4.0-SUCTION.zip
+unzip -a FC-GQCNN-4.0-PJ.zip
+unzip -a FC-GQCNN-4.0-SUCTION.zip
+cd ..
+```
+
+## Usage
+Start the grasp planning service:
+```bash
+roslaunch gqcnn grasp_planning_service.launch ns:=pj_gqcnn model_name:=FC-GQCNN-4.0-PJ fully_conv:=true
+```
+
+The example ROS policy can then be queried on saved images using:
+```bash
+python examples/policy_ros.py --depth_image data/examples/clutter/phoxi/fcgqcnn/depth_0.npy --segmask data/examples/clutter/phoxi/fcgqcnn/segmask_0.png --camera_intr data/calib/phoxi/phoxi.intr --namespace pj_gqcnn
+```

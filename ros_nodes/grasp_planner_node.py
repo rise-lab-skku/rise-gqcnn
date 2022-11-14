@@ -29,6 +29,7 @@ Author
 -----
 Vishal Satish & Jeff Mahler
 """
+import sys
 import json
 import math
 import os
@@ -55,8 +56,62 @@ from gqcnn.srv import (GQCNNGraspPlanner, GQCNNGraspPlannerBoundingBox,
 from gqcnn.msg import GQCNNGrasp
 
 
-class GraspPlanner(object):
+def imgmsg_to_cv2(img_msg):
+    """Convert ROS Image messages to OpenCV images.
 
+    `cv_bridge.imgmsg_to_cv2` is broken on the Python3.
+    `from cv_bridge.boost.cv_bridge_boost import getCvType` does not work.
+
+    Args:
+        img_msg (`sonsor_msgs/Image`): ROS Image msg
+
+    Raises:
+        NotImplementedError: Supported encodings are "8UC3" and "32FC1"
+
+    Returns:
+        `numpy.ndarray`: OpenCV image
+    """
+    # check data type
+    if img_msg.encoding == '8UC3':
+        dtype = np.uint8
+        n_channels = 3
+    elif img_msg.encoding == '8UC1':
+        dtype = np.uint8
+        n_channels = 1
+    elif img_msg.encoding == 'bgr8':
+        dtype = np.uint8
+        n_channels = 3
+    elif img_msg.encoding == 'rgb8':
+        dtype = np.uint8
+        n_channels = 3
+    elif img_msg.encoding == '32FC1':
+        dtype = np.float32
+        n_channels = 1
+    elif img_msg.encoding == '64FC1':
+        dtype = np.float64
+        n_channels = 1
+    else:
+        raise NotImplementedError(
+            'custom imgmsg_to_cv2 does not support {} encoding type'.format(
+                img_msg.encoding))
+
+    # bigendian
+    dtype = np.dtype(dtype)
+    dtype = dtype.newbyteorder('>' if img_msg.is_bigendian else '<')
+    if n_channels == 1:
+        img = np.ndarray(shape=(img_msg.height, img_msg.width),
+                         dtype=dtype, buffer=img_msg.data)
+    else:
+        img = np.ndarray(shape=(img_msg.height, img_msg.width, n_channels),
+                         dtype=dtype, buffer=img_msg.data)
+
+    # If the byte order is different between the message and the system.
+    if img_msg.is_bigendian == (sys.byteorder == 'little'):
+        img = img.byteswap().newbyteorder()
+    return img
+
+
+class GraspPlanner(object):
     def __init__(self, cfg, cv_bridge, grasping_policy, grasp_pose_publisher):
         """
         Parameters
@@ -129,8 +184,13 @@ class GraspPlanner(object):
             depth_im = DepthImage(self.cv_bridge.imgmsg_to_cv2(
                 raw_depth, desired_encoding="passthrough"),
                                   frame=camera_intr.frame)
-        except CvBridgeError as cv_bridge_exception:
-            rospy.logerr(cv_bridge_exception)
+        except Exception as cv_bridge_exception:
+            rospy.logwarn("CvBridge Error: {}. Try to use custom imgmsg_to_cv2"
+                          .format(cv_bridge_exception))
+            color_im = ColorImage(
+                imgmsg_to_cv2(raw_color), frame=camera_intr.frame)
+            depth_im = DepthImage(
+                imgmsg_to_cv2(raw_depth), frame=camera_intr.frame)
 
         # Check image sizes.
         if color_im.height != depth_im.height or \
@@ -192,8 +252,12 @@ class GraspPlanner(object):
             segmask = BinaryImage(self.cv_bridge.imgmsg_to_cv2(
                 raw_segmask, desired_encoding="passthrough"),
                                   frame=camera_intr.frame)
-        except CvBridgeError as cv_bridge_exception:
-            rospy.logerr(cv_bridge_exception)
+        except Exception as cv_bridge_exception:
+            rospy.logwarn("CvBridge Error: {}. Try to use custom imgmsg_to_cv2"
+                          .format(cv_bridge_exception))
+            segmask = BinaryImage(
+                imgmsg_to_cv2(raw_segmask), frame=camera_intr.frame)
+
         if color_im.height != segmask.height or \
            color_im.width != segmask.width:
             msg = ("Images and segmask must be the same shape! Color image is"

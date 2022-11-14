@@ -46,6 +46,98 @@ from visualization import Visualizer2D as vis
 from gqcnn.grasping import Grasp2D, SuctionPoint2D, GraspAction
 from gqcnn.msg import GQCNNGrasp
 from gqcnn.srv import GQCNNGraspPlanner, GQCNNGraspPlannerSegmask
+from sensor_msgs.msg import Image
+
+
+def imgmsg_to_cv2(img_msg):
+    """Convert ROS Image messages to OpenCV images.
+
+    `cv_bridge.imgmsg_to_cv2` is broken on the Python3.
+    `from cv_bridge.boost.cv_bridge_boost import getCvType` does not work.
+
+    Args:
+        img_msg (`sonsor_msgs/Image`): ROS Image msg
+
+    Raises:
+        NotImplementedError: Supported encodings are "8UC3" and "32FC1"
+
+    Returns:
+        `numpy.ndarray`: OpenCV image
+    """
+    # check data type
+    if img_msg.encoding == '8UC3':
+        dtype = np.uint8
+        n_channels = 3
+    elif img_msg.encoding == '8UC1':
+        dtype = np.uint8
+        n_channels = 1
+    elif img_msg.encoding == 'bgr8':
+        dtype = np.uint8
+        n_channels = 3
+    elif img_msg.encoding == 'rgb8':
+        dtype = np.uint8
+        n_channels = 3
+    elif img_msg.encoding == '32FC1':
+        dtype = np.float32
+        n_channels = 1
+    elif img_msg.encoding == '64FC1':
+        dtype = np.float64
+        n_channels = 1
+    else:
+        raise NotImplementedError(
+            'custom imgmsg_to_cv2 does not support {} encoding type'.format(
+                img_msg.encoding))
+
+    # bigendian
+    dtype = np.dtype(dtype)
+    dtype = dtype.newbyteorder('>' if img_msg.is_bigendian else '<')
+    if n_channels == 1:
+        img = np.ndarray(shape=(img_msg.height, img_msg.width),
+                         dtype=dtype, buffer=img_msg.data)
+    else:
+        img = np.ndarray(shape=(img_msg.height, img_msg.width, n_channels),
+                         dtype=dtype, buffer=img_msg.data)
+
+    # If the byte order is different between the message and the system.
+    if img_msg.is_bigendian == (sys.byteorder == 'little'):
+        img = img.byteswap().newbyteorder()
+    return img
+
+
+def cv2_to_imgmsg(img, encoding):
+    """Convert an OpenCV image to a ROS Image message.
+
+    `cv_bridge.imgmsg_to_cv2` is broken on the Python3.
+    `from cv_bridge.boost.cv_bridge_boost import getCvType` does not work.
+
+    Args:
+        img (`numpy.ndarray`): OpenCV image
+        encoding (str): Encoding of the image.
+
+    Raises:
+        NotImplementedError: Supported encodings are "8UC3" and "32FC1"
+
+    Returns:
+        `sensor_msgs/Image`: ROS Image msg
+    """
+    if not isinstance(img, np.ndarray):
+        raise TypeError('img must be of type numpy.ndarray')
+
+    # check encoding
+    if encoding == "passthrough":
+        raise NotImplementedError('custom cv2_to_imgmsg does not support passthrough encoding type')
+
+    # create msg
+    img_msg = Image()
+    img_msg.height = img.shape[0]
+    img_msg.width = img.shape[1]
+    img_msg.encoding = encoding
+    if img.dtype.byteorder == '>':
+        img_msg.is_bigendian = True
+    img_msg.data = img.tostring()
+    img_msg.step = len(img_msg.data) // img_msg.height
+    return img_msg
+
 
 # Set up logger.
 logger = Logger.get_logger("examples/policy_ros.py")
@@ -122,11 +214,25 @@ if __name__ == "__main__":
     # Read segmask.
     if segmask_filename is not None:
         segmask = BinaryImage.open(segmask_filename, frame=camera_intr.frame)
-        grasp_resp = plan_grasp_segmask(color_im.rosmsg, depth_im.rosmsg,
-                                        camera_intr.rosmsg, segmask.rosmsg)
+
+        # TODO: uncomment this for `noetic`
+        # grasp_resp = plan_grasp_segmask(color_im.rosmsg, depth_im.rosmsg,
+        #                                 camera_intr.rosmsg, segmask.rosmsg)
+        grasp_resp = plan_grasp_segmask(
+            cv2_to_imgmsg(color_im._data, "8UC3"),
+            cv2_to_imgmsg(depth_im._data, "32FC1"),
+            camera_intr.rosmsg,
+            cv2_to_imgmsg(segmask._data, "8UC1"),
+            )
     else:
-        grasp_resp = plan_grasp(color_im.rosmsg, depth_im.rosmsg,
-                                camera_intr.rosmsg)
+        # TODO: uncomment this for `noetic`
+        # grasp_resp = plan_grasp(color_im.rosmsg, depth_im.rosmsg,
+        #                         camera_intr.rosmsg)
+        grasp_resp = plan_grasp(
+            cv2_to_imgmsg(color_im._data, "8UC3"),
+            cv2_to_imgmsg(depth_im._data, "32FC1"),
+            camera_intr.rosmsg,
+            )
     grasp = grasp_resp.grasp
 
     # Convert to a grasp action.
@@ -149,9 +255,14 @@ if __name__ == "__main__":
     else:
         raise ValueError("Grasp type %d not recognized!" % (grasp_type))
     try:
-        thumbnail = DepthImage(cv_bridge.imgmsg_to_cv2(
-            grasp.thumbnail, desired_encoding="passthrough"),
-                               frame=camera_intr.frame)
+        # TODO: uncomment this for `noetic`
+        # thumbnail = DepthImage(cv_bridge.imgmsg_to_cv2(
+        #     grasp.thumbnail, desired_encoding="passthrough"),
+        #                        frame=camera_intr.frame)
+        thumbnail = DepthImage(
+            imgmsg_to_cv2(grasp.thumbnail),
+            frame=camera_intr.frame,
+            )
     except CvBridgeError as e:
         logger.error(e)
         logger.error("Failed to convert image")

@@ -44,8 +44,8 @@ from autolab_core import (Point, Logger, BinaryImage, CameraIntrinsics,
 from visualization import Visualizer2D as vis
 
 from gqcnn.grasping import Grasp2D, SuctionPoint2D, GraspAction
-from gqcnn.msg import GQCNNGrasp
-from gqcnn.srv import GQCNNGraspPlanner, GQCNNGraspPlannerSegmask
+from gqcnn_ros.msg import GQCNNGrasp
+from gqcnn_ros.srv import GQCNNGraspPlanner, GQCNNGraspPlannerSegmask
 from sensor_msgs.msg import Image
 
 

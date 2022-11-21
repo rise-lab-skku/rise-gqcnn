@@ -51,9 +51,9 @@ from gqcnn.utils import GripperMode, NoValidGraspsException
 
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Header
-from gqcnn.srv import (GQCNNGraspPlanner, GQCNNGraspPlannerBoundingBox,
+from gqcnn_ros.srv import (GQCNNGraspPlanner, GQCNNGraspPlannerBoundingBox,
                        GQCNNGraspPlannerSegmask)
-from gqcnn.msg import GQCNNGrasp
+from gqcnn_ros.msg import GQCNNGrasp
 
 
 def imgmsg_to_cv2(img_msg):
@@ -434,6 +434,7 @@ if __name__ == "__main__":
     model_name = rospy.get_param("~model_name")
     model_dir = rospy.get_param("~model_dir")
     fully_conv = rospy.get_param("~fully_conv")
+    zivid_camera = rospy.get_param("~zivid_camera")
     if model_dir.lower() == "default":
         model_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)),
                                  "../models")
@@ -483,6 +484,11 @@ if __name__ == "__main__":
     cfg = YamlConfig(config_filename)
     policy_cfg = cfg["policy"]
     policy_cfg["metric"]["gqcnn_model"] = model_dir
+
+    # change image resolution for zivid camera
+    if zivid_camera and fully_conv:
+        policy_cfg["metric"]["fully_conv_gqcnn_config"]["im_height"] = 400
+        policy_cfg["metric"]["fully_conv_gqcnn_config"]["im_width"] = 648
 
     # Create publisher to publish pose of final grasp.
     grasp_pose_publisher = rospy.Publisher("/gqcnn_grasp/pose",

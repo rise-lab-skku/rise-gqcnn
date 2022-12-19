@@ -30,4 +30,5 @@ uint8 grasp_type
 float64[2] center_px
 float64 angle
 float64 depth
+float64 approach_angle
 sensor_msgs/Image thumbnail

@@ -404,6 +404,7 @@ class GraspPlanner(object):
         gqcnn_grasp.center_px[1] = grasp.grasp.center[1]
         gqcnn_grasp.angle = grasp.grasp.angle
         gqcnn_grasp.depth = grasp.grasp.depth
+        gqcnn_grasp.approach_angle = grasp.grasp.approach_angle
         gqcnn_grasp.thumbnail = grasp.image.rosmsg
 
         # Create and publish the pose alone for easy visualization of grasp
@@ -487,8 +488,8 @@ if __name__ == "__main__":
 
     # change image resolution for zivid camera
     if zivid_camera and fully_conv:
-        policy_cfg["metric"]["fully_conv_gqcnn_config"]["im_height"] = 400
-        policy_cfg["metric"]["fully_conv_gqcnn_config"]["im_width"] = 648
+        policy_cfg["metric"]["fully_conv_gqcnn_config"]["im_height"] = 372
+        policy_cfg["metric"]["fully_conv_gqcnn_config"]["im_width"] = 603
 
     # Create publisher to publish pose of final grasp.
     grasp_pose_publisher = rospy.Publisher("/gqcnn_grasp/pose",

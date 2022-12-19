@@ -26,6 +26,7 @@ Factory functions to obtain `GQCNN`/`FCGQCNN` class based on backend.
 Author: Vishal Satish
 """
 from .tf import GQCNNTF, FCGQCNNTF
+from .pytorch import GQCNNPYTORCH
 
 from autolab_core import Logger
 
@@ -88,3 +89,28 @@ def get_fc_gqcnn_model(backend="tf", verbose=True):
         return FCGQCNNTF
     else:
         raise ValueError("Invalid backend: {}".format(backend))
+
+
+def get_gqcnn_pytorch_model(verbose=True):
+    """Get the GQ-CNN model for the PyTorch backend.
+
+    Note:
+        Currently only TensorFlow is supported.
+
+    Parameters
+    ----------
+    verbose : bool
+        Whether or not to log initialization output to `stdout`.
+
+    Returns
+    -------
+    :obj:`gqcnn.model.pytorch.GQCNNPYTORCH`
+        GQ-CNN model with PyTorch backend.
+    """
+
+    # Set up logger.
+    logger = Logger.get_logger("GQCNNModelFactory", silence=(not verbose))
+
+    # Return desired GQ-CNN instance based on backend.
+    logger.info("Initializing GQ-CNN with PyTorch as backend...")
+    return GQCNNPYTORCH

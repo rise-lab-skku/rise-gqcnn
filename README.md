@@ -74,3 +74,22 @@ The example ROS policy can then be queried on saved images using:
 ```bash
 python examples/policy_ros.py --depth_image data/examples/clutter/phoxi/fcgqcnn/depth_0.npy --segmask data/examples/clutter/phoxi/fcgqcnn/segmask_0.png --camera_intr data/calib/phoxi/phoxi.intr --namespace pj_gqcnn
 ```
+
+# GQ-CNN with PyTorch
+This branch contains a PyTorch implementation of the GQ-CNN, where you can use the original TensorFlow implementation on this branch. The original TensorFlow implementation can be found on the [melodic-devel](https://github.com/rise-lab-skku/rise-gqcnn/tree/melodic-devel).
+
+## Additional Installation
+Install PyTorch 1.10.1 with CUDA 11.1. You can install other versions of CUDA, but you need to install the corresponding version of PyTorch. Please see [PyTorch official website](https://pytorch.org/get-started/locally/) for more details.
+```bash
+pip install torch==1.10.1+cu111 torchvision==0.11.2+cu111 torchaudio==0.10.1 -f https://download.pytorch.org/whl/cu111/torch_stable.html
+```
+
+## Download pre-trained models from our synology
+Download pre-trained models on *models* directory. The models can be found on our synology `/Research Projects/2020_지능증강/NN_models/pytorch-gqcnn-models`.
+
+## Usage
+Start the grasp planning service:
+```bash
+roslaunch gqcnn grasp_planning_service.launch ns:=pj_gqcnn model_name:=PYTORCH-GQCNN-4.0-PJ backend:=pytorch
+```
+

@@ -39,7 +39,7 @@ import numpy as np
 import autolab_core.utils as utils
 from autolab_core import Point, PointCloud, RigidTransform, Logger, DepthImage
 
-from ..model import get_gqcnn_model, get_fc_gqcnn_model
+from ..model import get_gqcnn_model, get_fc_gqcnn_model, get_gqcnn_pytorch_model
 from .grasp import SuctionPoint2D
 from ..utils import GeneralConstants, GripperMode
 
@@ -1273,6 +1273,131 @@ class FCGQCnnQualityFunction(GraspQualityFunction):
         return self._fcgqcnn.predict(images, depths)
 
 
+class PyTorchGQCnnQualityFunction(GraspQualityFunction):
+
+    def __init__(self, config):
+        """Create a GQCNN suction quality function."""
+        GraspQualityFunction.__init__(self)
+
+        # Store parameters.
+        self._config = config
+        self._gqcnn_model_dir = config["gqcnn_model"]
+        self._crop_height = config["crop_height"]
+        self._crop_width = config["crop_width"]
+
+        # Init GQ-CNN
+        self._gqcnn = get_gqcnn_pytorch_model()(self._gqcnn_model_dir)
+
+    def grasps_to_tensors(self, grasps, state):
+        """Converts a list of grasps to an image and pose tensor
+        for fast grasp quality evaluation.
+
+        Attributes
+        ----------
+        grasps : :obj:`list` of :obj:`object`
+            List of image grasps to convert.
+        state : :obj:`RgbdImageState`
+            RGB-D image to plan grasps on.
+
+        Returns
+        -------
+        image_arr : :obj:`numpy.ndarray`
+            4D numpy tensor of image to be predicted.
+        pose_arr : :obj:`numpy.ndarray`
+            2D numpy tensor of depth values.
+        """
+        # Parse params.
+        gqcnn_im_height = self._gqcnn.im_height
+        gqcnn_im_width = self._gqcnn.im_width
+        gqcnn_num_channels = self._gqcnn.num_channels
+        gqcnn_pose_dim = self._gqcnn.pose_dim
+        gripper_mode = self._gqcnn.gripper_mode
+        num_grasps = len(grasps)
+        depth_im = state.rgbd_im.depth
+
+        # Allocate tensors.
+        tensor_start = time()
+        image_tensor = np.zeros(
+            [num_grasps, gqcnn_im_height, gqcnn_im_width, gqcnn_num_channels])
+        pose_tensor = np.zeros([num_grasps, gqcnn_pose_dim])
+        scale = gqcnn_im_height / self._crop_height
+        depth_im_scaled = depth_im.resize(scale)
+        for i, grasp in enumerate(grasps):
+            translation = scale * np.array([
+                depth_im.center[0] - grasp.center.data[1],
+                depth_im.center[1] - grasp.center.data[0]
+            ])
+            im_tf = depth_im_scaled
+            im_tf = depth_im_scaled.transform(translation, grasp.angle)
+            im_tf = im_tf.crop(gqcnn_im_height, gqcnn_im_width)
+            image_tensor[i, ...] = im_tf.raw_data
+
+            if gripper_mode == GripperMode.PARALLEL_JAW:
+                pose_tensor[i] = grasp.depth
+            elif gripper_mode == GripperMode.SUCTION:
+                pose_tensor[i, ...] = np.array(
+                    [grasp.depth, grasp.approach_angle])
+            elif gripper_mode == GripperMode.MULTI_SUCTION:
+                pose_tensor[i] = grasp.depth
+            elif gripper_mode == GripperMode.LEGACY_PARALLEL_JAW:
+                pose_tensor[i] = grasp.depth
+            elif gripper_mode == GripperMode.LEGACY_SUCTION:
+                pose_tensor[i, ...] = np.array(
+                    [grasp.depth, grasp.approach_angle])
+            else:
+                raise ValueError("Gripper mode %s not supported" %
+                                 (gripper_mode))
+        self._logger.debug("Tensor conversion took %.3f sec" %
+                           (time() - tensor_start))
+        return image_tensor, pose_tensor
+
+    def quality(self, state, actions, params):
+        """Evaluate the quality of a set of actions according to a GQ-CNN.
+
+        Parameters
+        ----------
+        state : :obj:`RgbdImageState`
+            State of the world described by an RGB-D image.
+        actions: :obj:`object`
+            Set of grasping actions to evaluate.
+        params: dict
+            Optional parameters for quality evaluation.
+
+        Returns
+        -------
+        :obj:`list` of float
+            Real-valued grasp quality predictions for each
+            action, between 0 and 1.
+        """
+        # Form tensors.
+        tensor_start = time()
+        image_tensor, pose_tensor = self.grasps_to_tensors(actions, state)
+        self._logger.info("Image transformation took %.3f sec" %
+                          (time() - tensor_start))
+        if params is not None and params["vis"]["tf_images"]:
+            # Read vis params.
+            k = params["vis"]["k"]
+            d = utils.sqrt_ceil(k)
+
+            # Display grasp transformed images.
+            from visualization import Visualizer2D as vis2d
+            vis2d.figure(size=(GeneralConstants.FIGSIZE,
+                               GeneralConstants.FIGSIZE))
+            for i, image_tf in enumerate(image_tensor[:k, ...]):
+                depth = pose_tensor[i][0]
+                vis2d.subplot(d, d, i + 1)
+                vis2d.imshow(DepthImage(image_tf))
+                vis2d.title("Image %d: d=%.3f" % (i, depth))
+            vis2d.show()
+
+        # Predict grasps.
+        predict_start = time()
+        output_arr = self.gqcnn.predict(image_tensor, pose_tensor)
+        q_values = output_arr[:, -1]
+        self._logger.info("Inference took %.3f sec" % (time() - predict_start))
+        return q_values.tolist()
+
+
 class GraspQualityFunctionFactory(object):
     """Factory for grasp quality functions."""
 
@@ -1304,6 +1429,8 @@ class GraspQualityFunctionFactory(object):
             return NoMagicQualityFunction(config)
         elif metric_type == "fcgqcnn":
             return FCGQCnnQualityFunction(config)
+        elif metric_type == "pytorch_gqcnn":
+            return PyTorchGQCnnQualityFunction(config)
         else:
             raise ValueError("Grasp function type %s not supported!" %
                              (metric_type))

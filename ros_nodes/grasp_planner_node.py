@@ -424,18 +424,10 @@ class GraspPlanner(object):
         return gqcnn_grasp
 
 
-if __name__ == "__main__":
-    # Initialize the ROS node.
-    rospy.init_node("Grasp_Sampler_Server")
-
+def run_grasp_planner_tf(model_name, model_dir, fully_conv, zivid_camera):
     # Initialize `CvBridge`.
     cv_bridge = CvBridge()
 
-    # Get configs.
-    model_name = rospy.get_param("~model_name")
-    model_dir = rospy.get_param("~model_dir")
-    fully_conv = rospy.get_param("~fully_conv")
-    zivid_camera = rospy.get_param("~zivid_camera")
     if model_dir.lower() == "default":
         model_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)),
                                  "../models")
@@ -538,3 +530,83 @@ if __name__ == "__main__":
 
     # Spin forever.
     rospy.spin()
+
+
+def run_grasp_planner_torch(model_name, model_dir):
+    # Initialize `CvBridge`.
+    cv_bridge = CvBridge()
+
+    if model_dir.lower() == "default":
+        model_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                 "../models")
+    model_dir = os.path.join(model_dir, model_name)
+    model_config = YamlConfig(os.path.join(model_dir, "config.yaml"))
+    gripper_mode = model_config["gripper_mode"]
+
+    if gripper_mode == GripperMode.PARALLEL_JAW:
+        config_filename = os.path.join(
+            os.path.dirname(os.path.realpath(__file__)), "..",
+            "cfg/examples/ros/pytorch_gqcnn_pj.yaml")
+    elif gripper_mode == GripperMode.SUCTION:
+        config_filename = os.path.join(
+            os.path.dirname(os.path.realpath(__file__)), "..",
+            "cfg/examples/ros/pytorch_gqcnn_suction.yaml")
+
+    # Read config.
+    cfg = YamlConfig(config_filename)
+    policy_cfg = cfg["policy"]
+    policy_cfg["metric"]["gqcnn_model"] = model_dir
+
+    # Create publisher to publish pose of final grasp.
+    grasp_pose_publisher = rospy.Publisher("/gqcnn_grasp/pose",
+                                           PoseStamped,
+                                           queue_size=10)
+
+    # Create a grasping policy.
+    rospy.loginfo("Creating Grasping Policy")
+    policy_type = "cem"
+    if "type" in policy_cfg:
+        policy_type = policy_cfg["type"]
+    if policy_type == "ranking":
+        grasping_policy = RobustGraspingPolicy(policy_cfg)
+    elif policy_type == "cem":
+        grasping_policy = CrossEntropyRobustGraspingPolicy(policy_cfg)
+    else:
+        raise ValueError("Invalid policy type: {}".format(policy_type))
+
+    # Create a grasp planner.
+    grasp_planner = GraspPlanner(cfg, cv_bridge, grasping_policy,
+                                 grasp_pose_publisher)
+
+    # Initialize the ROS service.
+    grasp_planning_service = rospy.Service("grasp_planner", GQCNNGraspPlanner,
+                                           grasp_planner.plan_grasp)
+    grasp_planning_service_bb = rospy.Service("grasp_planner_bounding_box",
+                                              GQCNNGraspPlannerBoundingBox,
+                                              grasp_planner.plan_grasp_bb)
+    grasp_planning_service_segmask = rospy.Service(
+        "grasp_planner_segmask", GQCNNGraspPlannerSegmask,
+        grasp_planner.plan_grasp_segmask)
+    rospy.loginfo("Grasping Policy Initialized")
+
+    # Spin forever.
+    rospy.spin()
+
+
+if __name__ == "__main__":
+    # Initialize the ROS node.
+    rospy.init_node("Grasp_Sampler_Server")
+
+    # Get configs.
+    model_name = rospy.get_param("~model_name")
+    model_dir = rospy.get_param("~model_dir")
+    fully_conv = rospy.get_param("~fully_conv")
+    zivid_camera = rospy.get_param("~zivid_camera")
+    backend = rospy.get_param("~backend")
+
+    if backend == "pytorch":
+        run_grasp_planner_torch(model_name, model_dir)
+    elif backend == "tensorflow":
+        run_grasp_planner_tf(model_name, model_dir, fully_conv, zivid_camera)
+    else:
+        raise ValueError("Invalid backend: {}".format(backend))

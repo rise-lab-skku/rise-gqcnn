@@ -90,6 +90,11 @@ Download pre-trained models on *models* directory. The models can be found on ou
 ## Usage
 Start the grasp planning service:
 ```bash
-roslaunch gqcnn grasp_planning_service.launch ns:=pj_gqcnn model_name:=PYTORCH-GQCNN-4.0-PJ backend:=pytorch
+source /home/sungwon/ws/ros_ws/bin_picking_ws/src/grasp_estimations/rise-gqcnn/venv/bin/activate
+roslaunch gqcnn_ros grasp_planning_service.launch ns:=pj_gqcnn model_name:=PYTORCH-GQCNN-4.0-PJ backend:=pytorch
 ```
 
+```bash
+source /home/sungwon/ws/ros_ws/bin_picking_ws/src/grasp_estimations/rise-gqcnn/venv/bin/activate
+roslaunch gqcnn_ros grasp_planning_service.launch ns:=sc_gqcnn model_name:=PYTORCH-GQCNN-4.0-SUCTION backend:=pytorch
+```

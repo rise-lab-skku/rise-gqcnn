@@ -1591,8 +1591,8 @@ class GQCNNTrainerTF(object):
                 # Rotate with 50% probability.
                 if np.random.rand() < 0.5:
                     theta = 180.0
-                    rot_map = cv2.getRotationMatrix2D(tuple(self.im_center),
-                                                      theta, 1)
+                    im_center = (int(self.im_center[0]), int(self.im_center[1]))
+                    rot_map = cv2.getRotationMatrix2D(im_center, theta, 1)
                     train_image = cv2.warpAffine(
                         train_image,
                         rot_map, (self.im_height, self.im_width),

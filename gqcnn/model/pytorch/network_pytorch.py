@@ -44,7 +44,7 @@ class GQCNNPYTORCH(object):
         # load config file from model directory
         config_path = os.path.join(model_dir, 'config.yaml')
         with open(config_path, 'r') as f:
-            pytorch_gqcnn_config = yaml.load(f)
+            pytorch_gqcnn_config = yaml.safe_load(f)
 
         # parse config
         self.gripper_mode = pytorch_gqcnn_config['gripper_mode']
@@ -114,6 +114,7 @@ class GQCNNPYTORCH(object):
 
         # inference
         output_arr = self._model(image_tensor, pose_tensor)
+        output_arr = torch.nn.functional.softmax(output_arr, dim=1) 
         output_arr = output_arr.detach().cpu().numpy()
 
         # Get total prediction time.

@@ -27,9 +27,10 @@ MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
   <arg name="ns"  default="gqcnn" />
   
   <!-- Configuration file for Grasp Planner Node -->
-  <arg name="model_name"       default="GQCNN-2.0" />
+  <arg name="model_name"       default="" />
   <arg name="model_dir"        default="default" />
   <arg name="fully_conv"       default="False" />
+  <!-- zivid_camera config for fully_conv-->
   <arg name="zivid_camera"     default="False" />
   <arg name="backend"          default="tensorflow" />
   

@@ -34,7 +34,8 @@ policy:
   # metric params
   metric:
     type: pytorch_gqcnn
-    gqcnn_model: models/PYTORCH-GQCNN-4.0-SUCTION
+    # gqcnn_model: models/PYTORCH-GQCNN-4.0-SUCTION
+    gqcnn_model:
 
     crop_height: 96
     crop_width: 96

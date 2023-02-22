@@ -54,18 +54,14 @@ class GQCNNPYTORCH(object):
             self.pose_dim = 2
 
         # import model from checkpoint
-        spec = spec_from_file_location('model.GQCNN', os.path.join(model_dir, 'model.py'))
-        module = module_from_spec(spec)
-        if 'model.GQCNN' in sys.modules:
-            del sys.modules['model.GQCNN']
-        sys.modules['model.GQCNN'] = module
-        spec.loader.exec_module(module)
+        sys.path.append(model_dir)
+        from model_ckpt.architecture import GQCNN
+        self._model = GQCNN(self.gripper_mode)
+        assert isinstance(self._model, torch.nn.Module)
+        self._model.to(self.device)
 
         # checkpoint
-        checkpoint = torch.load(os.path.join(model_dir, 'model.pt'))
-
-        # init model
-        self._model = module.GQCNN(self.gripper_mode)
+        checkpoint = torch.load(os.path.join(model_dir, 'model_ckpt/checkpoint.pt'))
         self._model.load_state_dict(checkpoint['model_state_dict'])
         self._model.to(self.device)
 
@@ -73,10 +69,16 @@ class GQCNNPYTORCH(object):
         self._model.eval()
 
     def init_mean_and_std(self, model_dir):
-        self._im_mean = np.load(os.path.join(model_dir, 'im_mean.npy'))
-        self._im_std = np.load(os.path.join(model_dir, 'im_std.npy'))
-        self._pose_mean = np.load(os.path.join(model_dir, 'pose_mean.npy'))
-        self._pose_std = np.load(os.path.join(model_dir, 'pose_std.npy'))
+        """Initialize the mean and standard deviation of the training data.
+
+        Args:
+            model_dir (str): path to the directory containing the model.
+        """
+        norm_dir = os.path.join(model_dir, 'norm_params')
+        self._im_mean = np.load(os.path.join(norm_dir, 'im_mean.npy'))
+        self._im_std = np.load(os.path.join(norm_dir, 'im_std.npy'))
+        self._pose_mean = np.load(os.path.join(norm_dir, 'pose_mean.npy'))
+        self._pose_std = np.load(os.path.join(norm_dir, 'pose_std.npy'))
 
     def predict(self, image_arr, pose_arr, verbose=False):
         """Predict the probability of grasp success given a depth image and

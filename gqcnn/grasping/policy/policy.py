@@ -50,7 +50,8 @@ from visualization import Visualizer2D as vis
 from ..constraint_fn import GraspConstraintFnFactory
 from ..grasp import Grasp2D, SuctionPoint2D, MultiSuctionPoint2D
 from ..grasp_quality_function import (GraspQualityFunctionFactory,
-                                      GQCnnQualityFunction)
+                                      GQCnnQualityFunction,
+                                      PyTorchGQCnnQualityFunction)
 from ..image_grasp_sampler import ImageGraspSamplerFactory
 from ...utils import GeneralConstants, NoValidGraspsException
 
@@ -1314,6 +1315,10 @@ class CrossEntropyRobustGraspingPolicy(GraspingPolicy):
         # Form return image.
         image = depth_im
         if isinstance(self._grasp_quality_fn, GQCnnQualityFunction):
+            image_arr, _ = self._grasp_quality_fn.grasps_to_tensors([grasp],
+                                                                    state)
+            image = DepthImage(image_arr[0, ...], frame=rgbd_im.frame)
+        elif isinstance(self._grasp_quality_fn, PyTorchGQCnnQualityFunction):
             image_arr, _ = self._grasp_quality_fn.grasps_to_tensors([grasp],
                                                                     state)
             image = DepthImage(image_arr[0, ...], frame=rgbd_im.frame)

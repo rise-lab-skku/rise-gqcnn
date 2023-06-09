@@ -45,7 +45,6 @@ from visualization import Visualizer2D as vis
 from gqcnn.grasping import (Grasp2D, SuctionPoint2D, RgbdImageState,
                             RobustGraspingPolicy,
                             CrossEntropyRobustGraspingPolicy,
-                            BetaProcessCrossEntropyRobustGraspingPolicy,
                             FullyConvolutionalGraspingPolicyParallelJaw,
                             FullyConvolutionalGraspingPolicySuction)
 from gqcnn.utils import GripperMode, NoValidGraspsException
@@ -53,7 +52,7 @@ from gqcnn.utils import GripperMode, NoValidGraspsException
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Header
 from gqcnn_ros.srv import (GQCNNGraspPlanner, GQCNNGraspPlannerBoundingBox,
-                           GQCNNGraspPlannerSegmask)
+                       GQCNNGraspPlannerSegmask)
 from gqcnn_ros.msg import GQCNNGrasp
 
 
@@ -545,15 +544,19 @@ def run_grasp_planner_torch(model_name, model_dir):
     gripper_mode = model_config["gripper_mode"]
 
     if gripper_mode == GripperMode.PARALLEL_JAW:
-        # _config = 'pytorch_gqcnn_pj.yaml'
-        _config = 'pytorch_gqcnn_feature_pj.yaml'
+        # config_filename = os.path.join(
+        #     os.path.dirname(os.path.realpath(__file__)), "..",
+        #     "cfg/examples/ros/pytorch_gqcnn_pj.yaml")
         config_filename = os.path.join(
-            os.path.dirname(os.path.realpath(__file__)), "..", "cfg/examples/ros", _config)
+            os.path.dirname(os.path.realpath(__file__)), "..",
+            "cfg/examples/ros/pytorch_gqcnn_feature_pj.yaml")  
     elif gripper_mode == GripperMode.SUCTION:
-        # _config = 'pytorch_gqcnn_suction.yaml'
-        _config = 'pytorch_gqcnn_feature_suction.yaml'
+        # config_filename = os.path.join(
+        #     os.path.dirname(os.path.realpath(__file__)), "..",
+        #     "cfg/examples/ros/pytorch_gqcnn_suction.yaml")
         config_filename = os.path.join(
-            os.path.dirname(os.path.realpath(__file__)), "..", "cfg/examples/ros", _config)
+            os.path.dirname(os.path.realpath(__file__)), "..",
+            "cfg/examples/ros/pytorch_gqcnn_feature_suction.yaml")
 
     # Read config.
     cfg = YamlConfig(config_filename)
@@ -574,8 +577,6 @@ def run_grasp_planner_torch(model_name, model_dir):
         grasping_policy = RobustGraspingPolicy(policy_cfg)
     elif policy_type == "cem":
         grasping_policy = CrossEntropyRobustGraspingPolicy(policy_cfg)
-    elif policy_type == 'beta':
-        grasping_policy = BetaRobustGraspingPolicy(policy_cfg)
     else:
         raise ValueError("Invalid policy type: {}".format(policy_type))
 

@@ -29,12 +29,14 @@ Authors
 -------
 Jason Liu & Jeff Mahler
 """
+import os
 from abc import ABC, abstractmethod
 from time import time
 
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 
 import autolab_core.utils as utils
 from autolab_core import Point, PointCloud, RigidTransform, Logger, DepthImage
@@ -1273,8 +1275,51 @@ class FCGQCnnQualityFunction(GraspQualityFunction):
         return self._fcgqcnn.predict(images, depths)
 
 
-class PyTorchGQCnnQualityFunction(GraspQualityFunction):
+class GraspQualityFunctionFactory(object):
+    """Factory for grasp quality functions."""
 
+    @staticmethod
+    def quality_function(metric_type, config):
+        if metric_type == "zero":
+            return ZeroGraspQualityFunction()
+        elif metric_type == "parallel_jaw_com_force_closure":
+            return ComForceClosureParallelJawQualityFunction(config)
+        elif metric_type == "suction_best_fit_planarity":
+            return BestFitPlanaritySuctionQualityFunction(config)
+        elif metric_type == "suction_approach_planarity":
+            return ApproachPlanaritySuctionQualityFunction(config)
+        elif metric_type == "suction_com_approach_planarity":
+            return ComApproachPlanaritySuctionQualityFunction(config)
+        elif metric_type == "suction_disc_approach_planarity":
+            return DiscApproachPlanaritySuctionQualityFunction(config)
+        elif metric_type == "suction_com_disc_approach_planarity":
+            return ComDiscApproachPlanaritySuctionQualityFunction(config)
+        elif metric_type == "suction_gaussian_curvature":
+            return GaussianCurvatureSuctionQualityFunction(config)
+        elif metric_type == "suction_disc_curvature":
+            return DiscCurvatureSuctionQualityFunction(config)
+        elif metric_type == "suction_com_disc_curvature":
+            return ComDiscCurvatureSuctionQualityFunction(config)
+        elif metric_type == "gqcnn":
+            return GQCnnQualityFunction(config)
+        elif metric_type == "nomagic":
+            return NoMagicQualityFunction(config)
+        elif metric_type == "fcgqcnn":
+            return FCGQCnnQualityFunction(config)
+        elif metric_type == "pytorch_gqcnn":
+            return PyTorchGQCnnQualityFunction(config)
+        # elif metric_type == "pytorch_gqcnn_feature":
+        #     return PyTorchGQCnnFeatureQualityFunction(config)
+        else:
+            raise ValueError("Grasp function type %s not supported!" %
+                             (metric_type))
+
+
+##########
+# Custom #
+##########
+
+class PyTorchGQCnnQualityFunction(GraspQualityFunction):
     def __init__(self, config):
         """Create a GQCNN suction quality function."""
         GraspQualityFunction.__init__(self)
@@ -1284,9 +1329,39 @@ class PyTorchGQCnnQualityFunction(GraspQualityFunction):
         self._gqcnn_model_dir = config["gqcnn_model"]
         self._crop_height = config["crop_height"]
         self._crop_width = config["crop_width"]
+        self._feature_layer = 'merge_stream[-1]'
+        print('\033[93m' + "[WARN] feature layer: merge_stram[-1]" + '\033[0m')
 
         # Init GQ-CNN
         self._gqcnn = get_gqcnn_pytorch_model()(self._gqcnn_model_dir)
+
+        # Init Activation
+        self._activation = self.get_activation(self._gqcnn._model, self._feature_layer)
+
+    @staticmethod
+    def get_activation(model, layer_name):
+        activation = {}
+
+        def hook(model, input, output):
+            activation[layer_name] = output.detach()
+
+        if layer_name == 'merge_stream[-2]':
+            layer = model.merge_stream[-2]
+            layer.register_forward_hook(hook)
+            return activation
+        elif layer_name == 'merge_stream[-1]':
+            layer = model.merge_stream[-1]
+            layer.register_forward_hook(hook)
+            return activation
+
+    def get_features(self):
+        """Get the features of the last forward pass.
+
+        Returns:
+        :obj:`torch.Tensor`
+            Features of the last forward pass. Shape is (B, dim).
+        """
+        return self._activation[self._feature_layer]
 
     def grasps_to_tensors(self, grasps, state):
         """Converts a list of grasps to an image and pose tensor
@@ -1302,9 +1377,9 @@ class PyTorchGQCnnQualityFunction(GraspQualityFunction):
         Returns
         -------
         image_arr : :obj:`numpy.ndarray`
-            4D numpy tensor of image to be predicted.
+            4D numpy tensor of image to be predicted. (B, H, W, C)
         pose_arr : :obj:`numpy.ndarray`
-            2D numpy tensor of depth values.
+            2D numpy tensor of depth values. (B, 1)
         """
         # Parse params.
         gqcnn_im_height = self._gqcnn.im_height
@@ -1351,7 +1426,7 @@ class PyTorchGQCnnQualityFunction(GraspQualityFunction):
                            (time() - tensor_start))
         return image_tensor, pose_tensor
 
-    def quality(self, state, actions, params):
+    def quality(self, state, actions, params=None):
         """Evaluate the quality of a set of actions according to a GQ-CNN.
 
         Parameters
@@ -1360,77 +1435,60 @@ class PyTorchGQCnnQualityFunction(GraspQualityFunction):
             State of the world described by an RGB-D image.
         actions: :obj:`object`
             Set of grasping actions to evaluate.
-        params: dict
-            Optional parameters for quality evaluation.
+        params : dict
+            Dictionary of parameters for the grasp quality function.
 
         Returns
         -------
         :obj:`list` of float
             Real-valued grasp quality predictions for each
             action, between 0 and 1.
+        :obj:`tuple` of :obj:`numpy.ndarray`
+            Tuple of image and pose tensors if desired.
         """
+        # Parse params.
+        return_tensor = False
+        if params is not None:
+            if 'return_tensor' in params.keys():
+                return_tensor = params['return_tensor']
+
         # Form tensors.
         tensor_start = time()
         image_tensor, pose_tensor = self.grasps_to_tensors(actions, state)
         self._logger.info("Image transformation took %.3f sec" %
                           (time() - tensor_start))
-        if params is not None and params["vis"]["tf_images"]:
-            # Read vis params.
-            k = params["vis"]["k"]
-            d = utils.sqrt_ceil(k)
-
-            # Display grasp transformed images.
-            from visualization import Visualizer2D as vis2d
-            vis2d.figure(size=(GeneralConstants.FIGSIZE,
-                               GeneralConstants.FIGSIZE))
-            for i, image_tf in enumerate(image_tensor[:k, ...]):
-                depth = pose_tensor[i][0]
-                vis2d.subplot(d, d, i + 1)
-                vis2d.imshow(DepthImage(image_tf))
-                vis2d.title("Image %d: d=%.3f" % (i, depth))
-            vis2d.show()
 
         # Predict grasps.
         predict_start = time()
         output_arr = self._gqcnn.predict(image_tensor, pose_tensor)
         q_values = output_arr[:, -1]
         self._logger.info("Inference took %.3f sec" % (time() - predict_start))
+
+        # Return tensor if desired.
+        if return_tensor:
+            return q_values.tolist(), (image_tensor, pose_tensor)
+
         return q_values.tolist()
 
+    def finetune(self, images, poses, labels, num_epoch, batch_size, lr, rehearsal_size=0):
+        """Finetune the GQ-CNN on a set of images and labels.
 
-class GraspQualityFunctionFactory(object):
-    """Factory for grasp quality functions."""
-
-    @staticmethod
-    def quality_function(metric_type, config):
-        if metric_type == "zero":
-            return ZeroGraspQualityFunction()
-        elif metric_type == "parallel_jaw_com_force_closure":
-            return ComForceClosureParallelJawQualityFunction(config)
-        elif metric_type == "suction_best_fit_planarity":
-            return BestFitPlanaritySuctionQualityFunction(config)
-        elif metric_type == "suction_approach_planarity":
-            return ApproachPlanaritySuctionQualityFunction(config)
-        elif metric_type == "suction_com_approach_planarity":
-            return ComApproachPlanaritySuctionQualityFunction(config)
-        elif metric_type == "suction_disc_approach_planarity":
-            return DiscApproachPlanaritySuctionQualityFunction(config)
-        elif metric_type == "suction_com_disc_approach_planarity":
-            return ComDiscApproachPlanaritySuctionQualityFunction(config)
-        elif metric_type == "suction_gaussian_curvature":
-            return GaussianCurvatureSuctionQualityFunction(config)
-        elif metric_type == "suction_disc_curvature":
-            return DiscCurvatureSuctionQualityFunction(config)
-        elif metric_type == "suction_com_disc_curvature":
-            return ComDiscCurvatureSuctionQualityFunction(config)
-        elif metric_type == "gqcnn":
-            return GQCnnQualityFunction(config)
-        elif metric_type == "nomagic":
-            return NoMagicQualityFunction(config)
-        elif metric_type == "fcgqcnn":
-            return FCGQCnnQualityFunction(config)
-        elif metric_type == "pytorch_gqcnn":
-            return PyTorchGQCnnQualityFunction(config)
-        else:
-            raise ValueError("Grasp function type %s not supported!" %
-                             (metric_type))
+        Parameters
+        ----------
+        images : :obj:`numpy.ndarray`
+            4D numpy tensor of images to finetune on.
+        poses : :obj:`numpy.ndarray`
+            2D numpy tensor of poses to finetune on.
+        labels : :obj:`numpy.ndarray`
+            2D numpy tensor of labels to finetune on.
+        num_epoch : int
+            Number of epochs to finetune for.
+        batch_size : int
+            Batch size to use for finetuning.
+        lr : float
+            Learning rate to use for finetuning.
+        rehearsal_size : int
+            Scale of rehearsal data to use for finetuning.
+        """
+        for _ in range(num_epoch):
+            self._gqcnn.finetune(images, poses, labels, batch_size, lr, rehearsal_size)

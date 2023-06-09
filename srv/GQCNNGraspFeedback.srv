@@ -1,0 +1,6 @@
+# request params
+GQCNNGrasp grasp
+bool grasp_success
+---
+# response params
+bool success

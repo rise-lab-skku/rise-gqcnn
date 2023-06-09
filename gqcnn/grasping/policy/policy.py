@@ -36,6 +36,10 @@ import os
 from time import time
 
 import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('TkAgg')
+import cv2
+
 import numpy as np
 import scipy.ndimage.filters as snf
 import scipy.stats as ss
@@ -79,6 +83,13 @@ class RgbdImageState(object):
         full_observed : :obj:`object`
             Representation of the fully observed state.
         """
+        assert isinstance(rgbd_im, RgbdImage)
+        assert isinstance(camera_intr, CameraIntrinsics)
+        if segmask is not None:
+            assert isinstance(segmask, BinaryImage)
+        if obj_segmask is not None:
+            assert isinstance(obj_segmask, SegmentationImage)
+
         self.rgbd_im = rgbd_im
         self.camera_intr = camera_intr
         self.segmask = segmask
@@ -153,7 +164,7 @@ class GraspAction(object):
     """Action to encapsulate grasps.
     """
 
-    def __init__(self, grasp, q_value, image=None, policy_name=None):
+    def __init__(self, grasp, q_value, image=None, policy_name=None, pos_num=None, neg_num=None):
         """
         Parameters
         ----------
@@ -166,10 +177,16 @@ class GraspAction(object):
         policy_name : str
             Policy name.
         """
+        assert isinstance(grasp, Grasp2D) or isinstance(grasp, SuctionPoint2D)
+        assert isinstance(image, DepthImage) or image is None
         self.grasp = grasp
         self.q_value = q_value
         self.image = image
         self.policy_name = policy_name
+
+        # added by me
+        self.pos_num = pos_num
+        self.neg_num = neg_num
 
     def save(self, save_dir):
         """Save grasp action.
@@ -694,23 +711,7 @@ class CrossEntropyRobustGraspingPolicy(GraspingPolicy):
             Python dictionary of functions to apply to filter invalid grasps.
 
         Notes
-        -----
-        Required configuration dictionary parameters are specified in Other
-        Parameters.
-
-        Other Parameters
-        ----------------
-        num_seed_samples : int
-            Number of candidate to sample in the initial set.
-        num_gmm_samples : int
-            Number of candidates to sample on each resampling from the GMMs.
-        num_iters : int
-            Number of sample-and-refit iterations of CEM.
-        gmm_refit_p : float
-            Top p-% of grasps used for refitting.
-        gmm_component_frac : float
-            Percentage of the elite set size used to determine number of GMM
-            components.
+        -----grasp.center
         gmm_reg_covar : float
             Regularization parameters for GMM covariance matrix, enforces
             diversity of fitted distributions.
@@ -1327,6 +1328,9 @@ class CrossEntropyRobustGraspingPolicy(GraspingPolicy):
         action = GraspAction(grasp, q_value, image)
         return action
 
+    def update(self, action, reward):
+        pass
+
 
 class QFunctionRobustGraspingPolicy(CrossEntropyRobustGraspingPolicy):
     """Optimizes a set of antipodal grasp candidates in image space using the
@@ -1664,3 +1668,1456 @@ class GreedyCompositeGraspingPolicy(CompositeGraspingPolicy):
         if actions is None:
             raise NoValidGraspsException()
         return actions, q_values
+
+
+##########
+# Custom #
+##########
+import torch
+
+
+def compute_distance(a, b, metric='euclidean'):
+    """Computes the distance between two features.
+
+    Parameters
+    ----------
+    a : torch.tensor
+        First feature with (N, dim) shape.
+    b : torch.tensor
+        Second feature with (M, dim) shape.
+
+    Returns
+    torch.tensor
+        Distance between two features with (N, M) shape.
+    """
+    if metric == 'euclidean':
+        batch_size = 100
+        dist = []
+        for i in range(0, b.shape[0], batch_size):
+            dist.append(torch.norm(a.unsqueeze(1) - b[i:i + batch_size].unsqueeze(0), dim=2) / torch.sqrt(torch.tensor(a.shape[1], dtype=torch.float32)))
+        return torch.cat(dist, dim=1)
+        # return torch.norm(a.unsqueeze(1) - b.unsqueeze(0), dim=2) / torch.sqrt(torch.tensor(a.shape[1], dtype=torch.float32))
+    elif metric == 'cosine':
+        a = a / torch.norm(a, dim=1, keepdim=True)
+        b = b / torch.norm(b, dim=1, keepdim=True)
+        return 1 - torch.mm(a, b.t())
+    else:
+        raise ValueError("Unknown metric: {}".format(metric))
+
+
+def get_beta_posterior(prior_features, prior_predictions, likelyhood_features, likelyhood_labels, prior_strength=2, dist_scale=25):
+    """Get posterior predictions using beta distribution.
+
+    Args:
+        prior_features (torch.tensor): prior features with (N, dim) shape.
+        prior_predictions (torch.tensor): prior predictions with (N, ) shape.
+        likelyhood_features (torch.tensor): likelyhood features with (M, dim) shape.
+        likelyhood_labels (torch.tensor): likelyhood labels with (M, ) shape.
+        prior_strength (float, optional): prior strength. Defaults to 2.
+        dist_scale (float, optional): scale for distance. Defaults to 25.
+
+    Returns:
+        torch.tensor: posterior # of positive with (N, ) shape.
+        torch.tensor: posterior # of negative with (N, ) shape.
+    """
+    # compute prior
+    prior_pos = prior_strength * prior_predictions
+    prior_neg = prior_strength * (1 - prior_predictions)
+
+    if likelyhood_features is None:
+        return (prior_pos, prior_neg)
+
+    # compute likelyhood
+    distance = compute_distance(prior_features, likelyhood_features)
+    distance = torch.exp(-distance * dist_scale)
+    distance[distance < 0.9] = 0.0
+
+    likelyhood_pos = torch.sum(distance * likelyhood_labels, dim=1) * 5
+    likelyhood_neg = torch.sum(distance * (1 - likelyhood_labels), dim=1) * 5
+
+    # compute posterior
+    posterior_pos = prior_pos + likelyhood_pos
+    posterior_neg = prior_neg + likelyhood_neg
+    return (posterior_pos, posterior_neg)
+
+
+class FeatureMap(object):
+    """Feature map for large 2d featrue model"""
+    def __init__(self, model_dir):
+        """Load feature map from model directory.
+
+        Args:
+            model_dir (str): model directory.
+        """
+        feature_map_dir = os.path.join(model_dir, 'feature', 'map')
+
+        # load feature map
+        self._feature_map_origin = np.load(os.path.join(feature_map_dir, 'feature_map.npy'))
+        self._feature_map_boundary = np.load(os.path.join(feature_map_dir, 'boundary.npy'))
+
+        # initialize feature map
+        self._feature_map = np.copy(self._feature_map_origin)
+
+    @property
+    def features(self):
+        """Get features of feature map. Shape: (N, 2)."""
+        x_min, x_max, y_min, y_max = self._feature_map_boundary
+        grid_resolution = self._feature_map.shape[0]
+        x, y = np.meshgrid(
+            np.linspace(x_min, x_max, grid_resolution),
+            np.linspace(y_min, y_max, grid_resolution))
+        xy = np.concatenate([x.reshape(-1, 1), y.reshape(-1, 1)], axis=1)
+        return xy
+
+    @property
+    def predictions(self):
+        """Get predictions from feature map. Shape: (N,)."""
+        return self._feature_map_origin.reshape(-1)
+
+    def plot(self, ax):
+        """Plot feature map.
+
+        Args:
+            ax (matplotlib.axes.Axes): matplotlib axes.
+        """
+        x_min, x_max, y_min, y_max = self._feature_map_boundary
+        ax.imshow(
+            self._feature_map,
+            extent=[x_min, x_max, y_min, y_max],
+            origin='lower', cmap='bwr',
+            vmin=0.0, vmax=1.0)
+
+    def update_with_beta_posterior(self, feature, labels, prior_strength=2.0, dist_scale=25.0):
+        """Update feature map with beta posterior.
+
+        Args:
+            feature (np.ndarray): normalized feature. Shape: (N, 2).
+            labels (np.ndarray): labels. Shape: (N,).
+            prior_strength (float): prior strength.
+            scale (float): scale.
+        """
+        # get device
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # get prior
+        prior_features = torch.from_numpy(self.features).float().to(device)
+        prior_predictions = torch.from_numpy(self.predictions).float().to(device)
+
+        # get likelihood
+        if isinstance(feature, torch.Tensor):
+            likelihood_features = feature.to(device)
+            likelihood_labels = labels.to(device)
+        elif isinstance(feature, np.ndarray):
+            likelihood_features = torch.from_numpy(feature).float().to(device)
+            likelihood_labels = torch.from_numpy(labels).float().to(device)
+        else:
+            raise ValueError("Unknown feature type: {}".format(type(feature)))
+
+        # get beta posterior
+        batch_size = 500
+        posterior = []
+        for i in range(0, prior_features.shape[0], batch_size):
+            _p, _, _ = get_beta_posterior(
+                prior_features[i:i+batch_size], prior_predictions[i:i+batch_size], likelihood_features, likelihood_labels,
+                prior_strength=prior_strength, dist_scale=dist_scale)
+            posterior.append(_p.cpu().numpy())
+        posterior = np.concatenate(posterior, axis=0)
+
+        # update feature map
+        self._feature_map = posterior.reshape(self._feature_map.shape)
+
+    def reset(self):
+        """Reset feature map."""
+        self._feature_map = np.copy(self._feature_map_origin)
+
+
+class FeatureBasedGraspingPolicy(GraspingPolicy):
+    def __init__(self, config):
+        super().__init__(config)
+        self._parse_config()
+
+        # set gqcnn model and device
+        gqcnn_model_dir = self.config['metric']['gqcnn_model']
+        self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # load feature map
+        try:
+            self._feature_map = FeatureMap(gqcnn_model_dir)
+            print('Feature map loaded.')
+        except FileNotFoundError:
+            self._feature_map = None
+            print('Feature map not found.')
+
+        # load feature_norm_params
+        self._feature_mean, self._feature_std = self._load_feature_norm_params(gqcnn_model_dir)
+
+        # load saved features
+        if config['feature']['data']:
+            self._likelihood_features, self._likelihood_labels = self._load_features(gqcnn_model_dir, config['feature']['data'])
+        else:
+            self._likelihood_features, self._likelihood_labels = None, None
+
+    def _parse_config(self):
+        """Parses the parameters of the policy."""
+        # Cross entropy method parameters.
+        self._num_seed_samples = self.config["num_seed_samples"]
+        self._num_gmm_samples = self.config["num_gmm_samples"]
+        self._num_iters = self.config["num_iters"]
+        self._gmm_refit_p = self.config["gmm_refit_p"]
+        self._gmm_component_frac = self.config["gmm_component_frac"]
+        self._gmm_reg_covar = self.config["gmm_reg_covar"]
+
+        self._depth_gaussian_sigma = 0.0
+        if "depth_gaussian_sigma" in self.config:
+            self._depth_gaussian_sigma = self.config["depth_gaussian_sigma"]
+
+        self._max_grasps_filter = 1
+        if "max_grasps_filter" in self.config:
+            self._max_grasps_filter = self.config["max_grasps_filter"]
+
+        self._max_resamples_per_iteration = 100
+        if "max_resamples_per_iteration" in self.config:
+            self._max_resamples_per_iteration = self.config[
+                "max_resamples_per_iteration"]
+
+        self._max_approach_angle = np.inf
+        if "max_approach_angle" in self.config:
+            self._max_approach_angle = np.deg2rad(
+                self.config["max_approach_angle"])
+
+        # Gripper parameters.
+        self._seed = None
+        if self.config["deterministic"]:
+            self._seed = GeneralConstants.SEED
+        self._gripper_width = np.inf
+        if "gripper_width" in self.config:
+            self._gripper_width = self.config["gripper_width"]
+
+        # Affordance map visualization.
+        self._vis_grasp_affordance_map = False
+        if "grasp_affordance_map" in self.config["vis"]:
+            self._vis_grasp_affordance_map = self.config["vis"][
+                "grasp_affordance_map"]
+
+        self._state_counter = 0  # Used for logging state data.
+
+        # Parse feature config
+        self._prior_strength = self.config['feature']['prior_strength']
+        self._dist_scale = self.config['feature']['dist_scale']
+
+    def _load_feature_norm_params(self, model_dir):
+        """Load feature normalization parameters.
+
+        Args:
+            model_dir (str): model directory.
+
+        Returns:
+            torch.Tensor: feature mean.
+            torch.Tensor: feature std.
+        """
+        feature_mean = np.load(os.path.join(model_dir, 'feature', 'norm_params', 'mean.npy'))
+        feature_std = np.load(os.path.join(model_dir, 'feature', 'norm_params', 'std.npy'))
+
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        feature_mean = torch.from_numpy(feature_mean).float().to(device)
+        feature_std = torch.from_numpy(feature_std).float().to(device)
+        return feature_mean, feature_std
+
+    def _load_features(self, model_dir, data_dir):
+        """Load features.
+
+        Args:
+            model_dir (str): model directory.
+            data_dir (str): data directory.
+
+        Returns:
+            torch.Tensor: features.
+            torch.Tensor: labels.
+        """
+        data_dir = os.path.join(model_dir, 'feature', 'data', data_dir)
+
+        # load features
+        augment_list = ['none', 'lr', 'ud', 'rot180']
+        features = []
+        labels = []
+        for augment in augment_list:
+            features.append(np.load(os.path.join(data_dir, 'features_{}.npy'.format(augment))))
+            # labels.append(np.load(os.path.join(data_dir, 'predictions_{}.npy'.format(augment))))
+            labels.append(np.load(os.path.join(data_dir, 'labels_{}.npy'.format(augment))))
+        features = np.concatenate(features, axis=0)
+        labels = np.concatenate(labels, axis=0)
+
+        # make tensor
+        features = torch.from_numpy(features).float().to(self._device)
+        labels = torch.from_numpy(labels).float().to(self._device)
+
+        # normalize
+        features = (features - self._feature_mean) / self._feature_std
+        print('Feature loaded. {} samples.'.format(features.shape[0]))
+        return features, labels
+
+    def get_beta_posterior(self, prior_features, prior_predictions):
+        """Get posterior distribution of beta distribution.
+
+        Args:
+            prior_features (torch.Tensor): prior features. (N, feature_dim)
+            prior_predictions (torch.Tensor): prior predictions. (N, )
+
+        Returns:
+            torch.Tensor: posterior positive counts. (N, )
+            torch.Tensor: posterior negative counts. (N, )
+        """
+        return get_beta_posterior(
+            prior_features, prior_predictions,
+            self._likelihood_features, self._likelihood_labels,
+            prior_strength=self._prior_strength,
+            dist_scale=self._dist_scale)
+
+    def optimize_grasps(self, grasps, q_values, depth_im, camera_intr, normal_cloud_im, segmask):
+        """Optimize grasps.
+
+        Args:
+            grasps (list of Grasp): grasps to optimize.
+            q_values (np.ndarray): q values of grasps.
+            depth_im (DepthImage): depth image.
+            camera_intr (CameraIntrinsics): camera intrinsics.
+            normal_cloud_im (NormalCloudImage): normal cloud image.
+            segmask (Image): segmentation mask.
+
+        Returns:
+            grasps (list of Grasp): optimized grasps.
+        """
+        # Get number of grasps and grasp type
+        num_grasps = len(grasps)
+        grasp_type = "parallel_jaw"
+        if isinstance(grasps[0], SuctionPoint2D):
+            grasp_type = "suction"
+        elif isinstance(grasps[0], MultiSuctionPoint2D):
+            grasp_type = "multi_suction"
+
+        # Sort grasps.
+        q_values_and_indices = zip(q_values, np.arange(num_grasps))
+        q_values_and_indices = sorted(
+            q_values_and_indices, key=lambda x: x[0], reverse=True)
+
+        # Fit elite set.
+        num_refit = max(int(np.ceil(self._gmm_refit_p * num_grasps)), 1)
+        elite_q_values = [i[0] for i in q_values_and_indices[:num_refit]]
+        elite_grasp_indices = [
+            i[1] for i in q_values_and_indices[:num_refit]
+        ]
+        elite_grasps = [grasps[i] for i in elite_grasp_indices]
+        elite_grasp_arr = np.array([g.feature_vec for g in elite_grasps])
+
+        # Normalize elite set.
+        elite_grasp_mean = np.mean(elite_grasp_arr, axis=0)
+        elite_grasp_std = np.std(elite_grasp_arr, axis=0)
+        elite_grasp_std[elite_grasp_std == 0] = 1e-6
+        elite_grasp_arr = (elite_grasp_arr - elite_grasp_mean) / elite_grasp_std
+
+        # Fit a GMM to the top samples.
+        num_components = max(
+            int(np.ceil(self._gmm_component_frac * num_refit)), 1)
+        uniform_weights = (1.0 / num_components) * np.ones(num_components)
+        gmm = GaussianMixture(
+            n_components=num_components,
+            weights_init=uniform_weights,
+            reg_covar=self._gmm_reg_covar)
+        gmm.fit(elite_grasp_arr)
+
+        # Sample the next grasps.
+        grasps = []
+        num_tries = 0
+        while (len(grasps) < self._num_gmm_samples and
+               num_tries < self._max_resamples_per_iteration):
+            # Sample from GMM.
+            sample_start = time()
+            grasp_vecs, _ = gmm.sample(n_samples=self._num_gmm_samples)
+            grasp_vecs = elite_grasp_std * grasp_vecs + elite_grasp_mean
+            self._logger.info("GMM sampling took {:.3f} sec".format(
+                (time() - sample_start)))
+
+            # Convert features to grasps and store if in segmask.
+            for k, grasp_vec in enumerate(grasp_vecs):
+                feature_start = time()
+                if grasp_type == "parallel_jaw":
+                    # Form grasp object.
+                    grasp = Grasp2D.from_feature_vec(
+                        grasp_vec,
+                        width=self._gripper_width,
+                        camera_intr=camera_intr)
+                elif grasp_type == "suction":
+                    # Read depth and approach axis.
+                    u = int(min(max(grasp_vec[1], 0), depth_im.height - 1))
+                    v = int(min(max(grasp_vec[0], 0), depth_im.width - 1))
+                    grasp_depth = depth_im[u, v, 0]
+
+                    # Approach axis.
+                    grasp_axis = -normal_cloud_im[u, v]
+
+                    # Form grasp object.
+                    grasp = SuctionPoint2D.from_feature_vec(
+                        grasp_vec,
+                        camera_intr=camera_intr,
+                        depth=grasp_depth,
+                        axis=grasp_axis)
+                self._logger.debug("Feature vec took {:.5f} sec".format(
+                    (time() - feature_start)))
+                bounds_start = time()
+                # Check in bounds.
+                if (segmask is None or
+                    (grasp.center.y >= 0
+                        and grasp.center.y < segmask.height
+                        and grasp.center.x >= 0
+                        and grasp.center.x < segmask.width
+                        and np.any(segmask[int(grasp.center.y),
+                                           int(grasp.center.x)] != 0)
+                        and grasp.approach_angle < self._max_approach_angle)
+                        and (self._grasp_constraint_fn is None
+                             or self._grasp_constraint_fn(grasp))):
+
+                    # Check validity according to filters.
+                    grasps.append(grasp)
+
+                # check num grasp samples
+                if len(grasps) == self._num_gmm_samples:
+                    break
+
+                self._logger.debug("Bounds took {:.5f} sec".format(
+                    (time() - bounds_start)))
+                num_tries += 1
+        return grasps
+
+    def update(self, action, reward):
+        """Updates the policy.
+
+        Args:
+            action(GraspAction): the executed action.
+            reward(float): the reward received for executing the action.
+                1 is success, 0 is failure.
+        """
+        assert isinstance(action, GraspAction)
+
+        # augment data
+        tf_depth_ims = []
+        poses = []
+        if isinstance(action.grasp, Grasp2D):
+            # original
+            tf_depth_im = action.image.data
+            tf_depth_ims.append(tf_depth_im)
+            poses.append(action.grasp.depth)
+
+            # flip lr
+            tf_depth_ims.append(np.flip(tf_depth_im, axis=1))
+            poses.append(action.grasp.depth)
+
+            # flip ud
+            tf_depth_ims.append(np.flip(tf_depth_im, axis=0))
+            poses.append(action.grasp.depth)
+
+            # flip lr and ud
+            tf_depth_ims.append(np.flip(np.flip(tf_depth_im, axis=1), axis=0))
+            poses.append(action.grasp.depth)
+        elif isinstance(action.grasp, SuctionPoint2D):
+            # original
+            tf_depth_im = action.image.data
+            pose = [action.grasp.depth, action.grasp.approach_angle]
+            tf_depth_ims.append(tf_depth_im)
+            poses.append(pose)
+
+            # flip lr
+            tf_depth_ims.append(np.flip(tf_depth_im, axis=1))
+            pose = [action.grasp.depth, action.grasp.approach_angle]
+            poses.append(pose)
+
+            # flip ud
+            tf_depth_ims.append(np.flip(tf_depth_im, axis=0))
+            pose = [action.grasp.depth, -action.grasp.approach_angle]
+            poses.append(pose)
+
+            # flip lr and ud
+            tf_depth_ims.append(np.flip(np.flip(tf_depth_im, axis=1), axis=0))
+            pose = [action.grasp.depth, -action.grasp.approach_angle]
+            poses.append(pose)
+        else:
+            raise ValueError("Invalid grasp type: {}".format(type(action.grasp)))
+
+        # make tensors
+        tf_depth_ims = np.expand_dims(np.array(tf_depth_ims), axis=-1)
+        if isinstance(action.grasp, Grasp2D):
+            poses = np.expand_dims(np.array(poses), axis=-1)
+        elif isinstance(action.grasp, SuctionPoint2D):
+            poses = np.array(poses)
+
+        # forward pass
+        self._grasp_quality_fn._gqcnn.predict(tf_depth_ims, poses)
+
+        # get features
+        features = self._grasp_quality_fn.get_features()
+        features = (features - self._feature_mean) / self._feature_std
+
+        # update likelihood
+        if self._likelihood_features is None:
+            self._likelihood_features = features
+        else:
+            self._likelihood_features = torch.cat(
+                [self._likelihood_features, features], dim=0)
+
+        # update labels
+        labels = np.array([reward] * len(features), dtype=np.float32)
+        labels = torch.from_numpy(labels).float().to(self._device)
+        if self._likelihood_labels is None:
+            self._likelihood_labels = labels
+        else:
+            self._likelihood_labels = torch.cat(
+                [self._likelihood_labels, labels], dim=0)
+
+    def label_grasp_on_image(self, color_img, grasp, quality):
+        # Convert quality to color.
+        color_map = plt.get_cmap('bwr')
+        color = color_map(quality)
+        color = (int(color[0] * 255), int(color[1] * 255), int(color[2] * 255))
+
+        if isinstance(grasp, Grasp2D):
+            cp1_px, cp2_px = grasp.endpoints
+            center_px = (cp1_px + cp2_px) / 2.0
+            cp1_px = (int(cp1_px[0]), int(cp1_px[1]))
+            cp2_px = (int(cp2_px[0]), int(cp2_px[1]))
+            center_px = (int(center_px[0]), int(center_px[1]))
+            cv2.line(color_img, cp1_px, cp2_px, color, 2)
+            cv2.circle(color_img, center_px, 5, color, -1)
+        elif isinstance(grasp, SuctionPoint2D):
+            center_px = grasp.center.data
+            center_px = (int(center_px[0]), int(center_px[1]))
+            cv2.circle(color_img, center_px, 5, color, -1)
+
+    def evaluate_action(self, actions):
+        """Computes the posterior from given actions.
+
+        Args:
+            actions (list of GraspAction): The list of executed actions. All actions must have
+                the same grasp type.
+
+        Returns:
+            posteriors (np.ndarray): (N, 1) array of posteriors.
+        """
+        if isinstance(actions[0].grasp, Grasp2D):
+            grasp_type = "parallel_jaw"
+        elif isinstance(actions[0].grasp, SuctionPoint2D):
+            grasp_type = "suction"
+
+        # make tensors
+        depth_tensors = []
+        pose_tensors = []
+        for action in actions:
+            if isinstance(action.grasp, Grasp2D):
+                if grasp_type != "parallel_jaw":
+                    raise ValueError("Grasp type mismatch")
+                depth_tensors.append(action.image.data)
+                pose_tensors.append([action.grasp.depth])
+            elif isinstance(action.grasp, SuctionPoint2D):
+                if grasp_type != "suction":
+                    raise ValueError("Grasp type mismatch")
+                depth_tensors.append(action.image.data)
+                pose_tensors.append([action.grasp.depth, action.grasp.approach_angle])
+            else:
+                raise ValueError("Invalid grasp type: {}".format(type(action.grasp)))
+        depth_tensors = np.expand_dims(np.array(depth_tensors), axis=-1)
+        pose_tensors = np.array(pose_tensors)
+
+        # forward pass
+        prior_predictions = self._grasp_quality_fn._gqcnn.predict(
+            depth_tensors, pose_tensors)[:, -1]
+        prior_predictions = torch.from_numpy(prior_predictions).float().to(self._device)
+        prior_features = self._grasp_quality_fn.get_features()
+        prior_features = (prior_features - self._feature_mean) / (self._feature_std)
+
+        # compute posterior
+        post_pos, post_neg = get_beta_posterior(
+            prior_features, prior_predictions,
+            self._likelihood_features, self._likelihood_labels,
+            prior_strength=self._prior_strength,
+            dist_scale=self._dist_scale)
+
+        # return posterior
+        posteriors = post_pos / (post_pos + post_neg)
+        posteriors = posteriors.cpu().numpy()
+        return posteriors
+
+    def extract_feature_from_action(self, actions):
+        """Extract features from actions.
+
+        Args:
+            actions (list of GraspAction): The list of executed actions. All actions must have
+                the same grasp type.
+
+        Returns:
+            features (np.ndarray): (N, feature_dim) array of features.
+        """
+        if isinstance(actions[0].grasp, Grasp2D):
+            grasp_type = "parallel_jaw"
+        elif isinstance(actions[0].grasp, SuctionPoint2D):
+            grasp_type = "suction"
+
+        # make tensors
+        depth_tensors = []
+        pose_tensors = []
+        for action in actions:
+            if isinstance(action.grasp, Grasp2D):
+                if grasp_type != "parallel_jaw":
+                    raise ValueError("Grasp type mismatch")
+                depth_tensors.append(action.image.data)
+                pose_tensors.append([action.grasp.depth])
+            elif isinstance(action.grasp, SuctionPoint2D):
+                if grasp_type != "suction":
+                    raise ValueError("Grasp type mismatch")
+                depth_tensors.append(action.image.data)
+                pose_tensors.append([action.grasp.depth, action.grasp.approach_angle])
+            else:
+                raise ValueError("Invalid grasp type: {}".format(type(action.grasp)))
+        depth_tensors = np.expand_dims(np.array(depth_tensors), axis=-1)
+        pose_tensors = np.array(pose_tensors)
+
+        # forward pass
+        predictions = self._grasp_quality_fn._gqcnn.predict(
+            depth_tensors, pose_tensors)[:, -1]
+        predictions = torch.from_numpy(predictions).float().to(self._device)
+        features = self._grasp_quality_fn.get_features()
+        features = (features - self._feature_mean) / (self._feature_std)
+        features = features.cpu().numpy()
+        return features
+
+
+class UCBThompsonSamplingGraspingPolicy(FeatureBasedGraspingPolicy):
+    def __init__(self, config):
+        super().__init__(config)
+
+        # TODO: make it configurable
+        self._ucb_delta = 0.05
+
+    def _action(self, state):
+        # Parse state.
+        rgbd_im = state.rgbd_im
+        depth_im = rgbd_im.depth
+        #        camera_intr = state.camera_intr
+        #        segmask = state.segmask
+
+        # get action set
+        grasps, post_pos, post_neg = self.action_set(state)
+
+        # Predict grasps.
+        grasps, post_pos, post_neg = self.prune_action_set(
+            grasps, post_pos, post_neg)
+
+        # select grasp
+        grasp, q_value = self.select(grasps, post_pos, post_neg)
+
+        # Form return image.
+        image = depth_im
+        if isinstance(self._grasp_quality_fn, GQCnnQualityFunction):
+            image_arr, _ = self._grasp_quality_fn.grasps_to_tensors([grasp],
+                                                                    state)
+            image = DepthImage(image_arr[0, ...], frame=rgbd_im.frame)
+        elif isinstance(self._grasp_quality_fn, PyTorchGQCnnQualityFunction):
+            image_arr, _ = self._grasp_quality_fn.grasps_to_tensors([grasp],
+                                                                    state)
+            image = DepthImage(image_arr[0, ...], frame=rgbd_im.frame)
+
+        # Return action.
+        action = GraspAction(grasp, q_value, image)
+        return action
+
+    def action_set(self, state):
+        """Gather a set of actions for a given state.
+
+        Args:
+            state (RgbdImageState): the state to gather actions for.
+
+        Returns:
+            list of Grasp: the set of grasps for the given state.
+            list of float: the posterior positive counts.
+            list of float: the posterior negative counts.
+        """
+        # Check valid input.
+        if not isinstance(state, RgbdImageState):
+            raise ValueError("Must provide an RGB-D image state.")
+
+        # Parse state.
+        rgbd_im = state.rgbd_im
+        depth_im = rgbd_im.depth
+        camera_intr = state.camera_intr
+        segmask = state.segmask
+        point_cloud_im = camera_intr.deproject_to_image(depth_im)
+        normal_cloud_im = point_cloud_im.normal_cloud_im()
+
+        # Sample grasps.
+        self._logger.info("Sampling seed set")
+        grasps = self._grasp_sampler.sample(
+            rgbd_im,
+            camera_intr,
+            self._num_seed_samples,
+            segmask=segmask,
+            visualize=self.config["vis"]["grasp_sampling"],
+            constraint_fn=self._grasp_constraint_fn,
+            seed=self._seed)
+        num_grasps = len(grasps)
+        if num_grasps == 0:
+            self._logger.warning("No valid grasps could be found")
+            raise NoValidGraspsException()
+
+        # iteratively gather grasps
+        grasp_set = []
+        post_pos_count_set = []
+        post_neg_count_set = []
+        for j in range(self._num_iters + 1):
+            # Predict grasps.
+            q_values = self._grasp_quality_fn(
+                state, grasps, params=self._config)
+            prior_features = self._grasp_quality_fn.get_features()
+            prior_features = (prior_features - self._feature_mean) / (self._feature_std)
+            prior_predictions = torch.from_numpy(np.array(q_values)).float().to(self._device)
+
+            # get posterior
+            post_pos, post_neg = self.get_beta_posterior(prior_features, prior_predictions)
+            post_pos = post_pos.detach().cpu().numpy().tolist()
+            post_neg = post_neg.detach().cpu().numpy().tolist()
+
+            # add to set
+            grasp_set += grasps
+            post_pos_count_set += post_pos
+            post_neg_count_set += post_neg
+
+            # break if last iteration
+            if j == self._num_iters:
+                break
+
+            # get optimistic q values with upper confidence bound
+            ucb_q_values = ss.beta.ppf(1 - self._ucb_delta, post_pos, post_neg)
+            grasps = self.optimize_grasps(grasps, ucb_q_values, depth_im, camera_intr, normal_cloud_im, segmask)
+
+        return grasp_set, post_pos_count_set, post_neg_count_set
+
+    def prune_action_set(self, grasps, post_pos_counts, post_neg_counts):
+        """Delete Actions whose ucb q value is less than the maximum lcb q value.
+
+        Args:
+            grasps (list of list of Grasp): grasp set.
+            post_pos_counts (list of list of float): posterior positive counts.
+            post_neg_counts (list of list of float): posterior negative counts.
+
+        Returns:
+            list of Grasp: pruned grasps
+            list of float: pruned posterior positive counts.
+            list of float: pruned posterior negative counts.
+        """
+        # get confident grasp indices
+        lcb, ucb = ss.beta.interval(1 - 2 * self._ucb_delta, post_pos_counts, post_neg_counts)
+        candidate_indices = np.where(ucb > np.max(lcb, axis=0))[0]
+
+        # prune
+        grasps = [grasps[i] for i in candidate_indices]
+        post_neg_counts = [post_neg_counts[i] for i in candidate_indices]
+        post_pos_counts = [post_pos_counts[i] for i in candidate_indices]
+        return grasps, post_pos_counts, post_neg_counts
+
+    def select(self, grasps, post_pos_counts, post_neg_counts):
+        """Select a grasp based on Thompson Sampling.
+
+        Args:
+            grasps (list of list of Grasp): grasp set.
+            post_pos_counts (list of list of float): posterior positive counts.
+            post_neg_counts (list of list of float): posterior negative counts.
+
+        Returns:
+            Grasp: selected grasp.
+            float: selected posterior q value.
+        """
+        # sample posterior q values
+        q_values = ss.beta.rvs(post_pos_counts, post_neg_counts)
+        sample_idx = np.argmax(q_values, axis=0)
+
+        # return best grasp
+        sampled_grasp = grasps[sample_idx]
+        sampled_q_value = post_pos_counts[sample_idx] / (post_pos_counts[sample_idx] + post_neg_counts[sample_idx])
+        return sampled_grasp, sampled_q_value
+
+
+class BetaProcessCrossEntropyRobustGraspingPolicy(GraspingPolicy):
+    # __call__(state) -> action(state) -> _action(state)
+    """Optimizes a set of grasp candidates in image space using the
+    cross entropy method.
+    """
+
+    def __init__(self, config):
+        """
+        Parameters
+        ----------
+        config : dict
+            Python dictionary of policy configuration parameters.
+
+        Notes
+        -----
+        Required configuration dictionary parameters are specified in Other
+        Parameters.
+
+        Other Parameters
+        ----------------
+        num_seed_samples : int
+            Number of candidate to sample in the initial set.
+        num_gmm_samples : int
+            Number of candidates to sample on each resampling from the GMMs.
+        num_iters : int
+            Number of sample-and-refit iterations of CEM.
+        gmm_refit_p : float
+            Top p-% of grasps used for refitting.
+        gmm_component_frac : float
+            Percentage of the elite set size used to determine number of GMM
+            components.
+        gmm_reg_covar : float
+            Regularization parameters for GMM covariance matrix, enforces
+            diversity of fitted distributions.
+        deterministic : bool, optional
+            Whether to set the random seed to enforce deterministic behavior.
+        gripper_width : float, optional
+            Width of the gripper in meters.
+        """
+        GraspingPolicy.__init__(self, config)
+        self._parse_config()
+        self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # parse feature config
+        gqcnn_model_dir = config['metric']['gqcnn_model']
+        self._prior_strength = config['feature']['prior_strength']
+        self._dist_scale = config['feature']['dist_scale']
+
+        # load feature map
+        try:
+            self._feature_map = FeatureMap(gqcnn_model_dir)
+            print('Feature map loaded.')
+        except FileNotFoundError:
+            self._feature_map = None
+            print('Feature map not found.')
+
+        # load feature_norm_params
+        self._feature_mean, self._feature_std = self._load_feature_norm_params(gqcnn_model_dir)
+
+        # load saved features
+        if config['feature']['data']:
+            self._likelihood_features, self._likelihood_labels = self._load_features(gqcnn_model_dir, config['feature']['data'])
+        else:
+            self._likelihood_features, self._likelihood_labels = None, None
+
+    def _load_feature_norm_params(self, model_dir):
+        """Load feature normalization parameters.
+
+        Args:
+            model_dir (str): model directory.
+
+        Returns:
+            torch.Tensor: feature mean.
+            torch.Tensor: feature std.
+        """
+        feature_mean = np.load(os.path.join(model_dir, 'feature', 'norm_params', 'mean.npy'))
+        feature_std = np.load(os.path.join(model_dir, 'feature', 'norm_params', 'std.npy'))
+
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        feature_mean = torch.from_numpy(feature_mean).float().to(device)
+        feature_std = torch.from_numpy(feature_std).float().to(device)
+        return feature_mean, feature_std
+
+    def _load_features(self, model_dir, data_dir):
+        """Load features.
+
+        Args:
+            model_dir (str): model directory.
+            data_dir (str): data directory.
+
+        Returns:
+            torch.Tensor: features.
+            torch.Tensor: labels.
+        """
+        data_dir = os.path.join(model_dir, 'feature', 'data', data_dir)
+
+        # load features
+        augment_list = ['none', 'lr', 'ud', 'rot180']
+        features = []
+        labels = []
+        for augment in augment_list:
+            features.append(np.load(os.path.join(data_dir, 'features_{}.npy'.format(augment))))
+            # labels.append(np.load(os.path.join(data_dir, 'predictions_{}.npy'.format(augment))))
+            labels.append(np.load(os.path.join(data_dir, 'labels_{}.npy'.format(augment))))
+        features = np.concatenate(features, axis=0)
+        labels = np.concatenate(labels, axis=0)
+
+        # make tensor
+        features = torch.from_numpy(features).float().to(self._device)
+        labels = torch.from_numpy(labels).float().to(self._device)
+
+        # normalize
+        features = (features - self._feature_mean) / self._feature_std
+        print('Feature loaded. {} samples.'.format(features.shape[0]))
+        return features, labels
+
+    def _parse_config(self):
+        """Parses the parameters of the policy."""
+        # Cross entropy method parameters.
+        self._num_seed_samples = self.config["num_seed_samples"]
+        self._num_gmm_samples = self.config["num_gmm_samples"]
+        self._num_iters = self.config["num_iters"]
+        self._gmm_refit_p = self.config["gmm_refit_p"]
+        self._gmm_component_frac = self.config["gmm_component_frac"]
+        self._gmm_reg_covar = self.config["gmm_reg_covar"]
+
+        self._depth_gaussian_sigma = 0.0
+        if "depth_gaussian_sigma" in self.config:
+            self._depth_gaussian_sigma = self.config["depth_gaussian_sigma"]
+
+        self._max_grasps_filter = 1
+        if "max_grasps_filter" in self.config:
+            self._max_grasps_filter = self.config["max_grasps_filter"]
+
+        self._max_resamples_per_iteration = 100
+        if "max_resamples_per_iteration" in self.config:
+            self._max_resamples_per_iteration = self.config[
+                "max_resamples_per_iteration"]
+
+        self._max_approach_angle = np.inf
+        if "max_approach_angle" in self.config:
+            self._max_approach_angle = np.deg2rad(
+                self.config["max_approach_angle"])
+
+        # Gripper parameters.
+        self._seed = None
+        if self.config["deterministic"]:
+            self._seed = GeneralConstants.SEED
+        self._gripper_width = np.inf
+        if "gripper_width" in self.config:
+            self._gripper_width = self.config["gripper_width"]
+
+        # Affordance map visualization.
+        self._vis_grasp_affordance_map = False
+        if "grasp_affordance_map" in self.config["vis"]:
+            self._vis_grasp_affordance_map = self.config["vis"][
+                "grasp_affordance_map"]
+
+        self._state_counter = 0  # Used for logging state data.
+
+    def select(self, q_values, post_pos, post_neg):
+        random_posterior = np.random.beta(post_pos, post_neg)
+        idx = np.argmax(random_posterior)
+        return idx
+
+    def action_set(self, state):
+        """Plan a set of grasps with the highest probability of success on
+        the given RGB-D image.
+
+        Parameters
+        ----------
+        state : :obj:`RgbdImageState`
+            Image to plan grasps on.
+
+        Returns
+        -------
+        python list of :obj:`gqcnn.grasping.Grasp2D` or :obj:`gqcnn.grasping.SuctionPoint2D`  # noqa E501
+            Grasps to execute.
+        """
+        # Check valid input.
+        if not isinstance(state, RgbdImageState):
+            raise ValueError("Must provide an RGB-D image state.")
+
+        # Parse state.
+        rgbd_im = state.rgbd_im
+        color_im = rgbd_im.color
+        depth_im = rgbd_im.depth
+        camera_intr = state.camera_intr
+        segmask = state.segmask
+        point_cloud_im = camera_intr.deproject_to_image(depth_im)
+        normal_cloud_im = point_cloud_im.normal_cloud_im()
+
+        # Sample grasps.
+        self._logger.info("Sampling seed set")
+        grasps = self._grasp_sampler.sample(
+            rgbd_im,
+            camera_intr,
+            self._num_seed_samples,
+            segmask=segmask,
+            visualize=self.config["vis"]["grasp_sampling"],
+            constraint_fn=self._grasp_constraint_fn,
+            seed=self._seed)
+        num_grasps = len(grasps)
+        if num_grasps == 0:
+            self._logger.warning("No valid grasps could be found")
+            raise NoValidGraspsException()
+
+        grasp_type = "parallel_jaw"
+        if isinstance(grasps[0], SuctionPoint2D):
+            grasp_type = "suction"
+        elif isinstance(grasps[0], MultiSuctionPoint2D):
+            grasp_type = "multi_suction"
+
+        # Iteratively refit and sample.
+        grasps_stack = []
+        q_values_stack = []
+        post_pos_stack = []
+        post_neg_stack = []
+        feature_stack = []
+        for j in range(self._num_iters):
+            # Predict grasps.
+            q_values = self._grasp_quality_fn(state,
+                                              grasps,
+                                              params=self._config)
+            prior_features = self._grasp_quality_fn.get_features()
+            prior_features = (prior_features - self._feature_mean) / (self._feature_std)
+            prior_predictions = torch.from_numpy(np.array(q_values)).float().to(self._device)
+
+            # update q values
+            q_values, post_pos, post_neg = get_beta_posterior(
+                prior_features, prior_predictions,
+                self._likelihood_features, self._likelihood_labels,
+                prior_strength=self._prior_strength,
+                dist_scale=self._dist_scale)
+            q_values = q_values.detach().cpu().numpy().tolist()
+            post_pos = post_pos.detach().cpu().numpy().tolist()
+            post_neg = post_neg.detach().cpu().numpy().tolist()
+
+            # save to stack
+            grasps_stack.append(grasps)
+            q_values_stack.append(q_values)
+            post_pos_stack.append(post_pos)
+            post_neg_stack.append(post_neg)
+            feature_stack.append(prior_features)
+
+            # Sort grasps.
+            q_values_and_indices = zip(q_values, np.arange(num_grasps))
+            q_values_and_indices = sorted(q_values_and_indices,
+                                          key=lambda x: x[0],
+                                          reverse=True)
+
+            # Fit elite set.
+            num_refit = max(int(np.ceil(self._gmm_refit_p * num_grasps)), 1)
+            elite_q_values = [i[0] for i in q_values_and_indices[:num_refit]]
+            elite_grasp_indices = [
+                i[1] for i in q_values_and_indices[:num_refit]
+            ]
+            elite_grasps = [grasps[i] for i in elite_grasp_indices]
+            elite_grasp_arr = np.array([g.feature_vec for g in elite_grasps])
+
+            # Normalize elite set.
+            elite_grasp_mean = np.mean(elite_grasp_arr, axis=0)
+            elite_grasp_std = np.std(elite_grasp_arr, axis=0)
+            elite_grasp_std[elite_grasp_std == 0] = 1e-6
+            elite_grasp_arr = (elite_grasp_arr -
+                               elite_grasp_mean) / elite_grasp_std
+
+            # Fit a GMM to the top samples.
+            num_components = max(
+                int(np.ceil(self._gmm_component_frac * num_refit)), 1)
+            uniform_weights = (1.0 / num_components) * np.ones(num_components)
+            gmm = GaussianMixture(n_components=num_components,
+                                  weights_init=uniform_weights,
+                                  reg_covar=self._gmm_reg_covar)
+            gmm.fit(elite_grasp_arr)
+
+            # Sample the next grasps.
+            grasps = []
+            num_tries = 0
+            while (len(grasps) < self._num_gmm_samples
+                   and num_tries < self._max_resamples_per_iteration):
+                # Sample from GMM.
+                sample_start = time()
+                grasp_vecs, _ = gmm.sample(n_samples=self._num_gmm_samples)
+                grasp_vecs = elite_grasp_std * grasp_vecs + elite_grasp_mean
+                self._logger.info("GMM sampling took %.3f sec" %
+                                  (time() - sample_start))
+
+                # Convert features to grasps and store if in segmask.
+                for k, grasp_vec in enumerate(grasp_vecs):
+                    feature_start = time()
+                    if grasp_type == "parallel_jaw":
+                        # Form grasp object.
+                        grasp = Grasp2D.from_feature_vec(
+                            grasp_vec,
+                            width=self._gripper_width,
+                            camera_intr=camera_intr)
+                    elif grasp_type == "suction":
+                        # Read depth and approach axis.
+                        u = int(min(max(grasp_vec[1], 0), depth_im.height - 1))
+                        v = int(min(max(grasp_vec[0], 0), depth_im.width - 1))
+                        grasp_depth = depth_im[u, v, 0]
+
+                        # Approach axis.
+                        grasp_axis = -normal_cloud_im[u, v]
+
+                        # Form grasp object.
+                        grasp = SuctionPoint2D.from_feature_vec(
+                            grasp_vec,
+                            camera_intr=camera_intr,
+                            depth=grasp_depth,
+                            axis=grasp_axis)
+                    self._logger.debug("Feature vec took %.5f sec" %
+                                       (time() - feature_start))
+
+                    bounds_start = time()
+                    # Check in bounds.
+                    if (state.segmask is None or
+                        (grasp.center.y >= 0
+                         and grasp.center.y < state.segmask.height
+                         and grasp.center.x >= 0
+                         and grasp.center.x < state.segmask.width
+                         and np.any(state.segmask[int(grasp.center.y),
+                                                  int(grasp.center.x)] != 0)
+                         and grasp.approach_angle < self._max_approach_angle)
+                            and (self._grasp_constraint_fn is None
+                                 or self._grasp_constraint_fn(grasp))):
+
+                        # Check validity according to filters.
+                        grasps.append(grasp)
+                    self._logger.debug("Bounds took %.5f sec" %
+                                       (time() - bounds_start))
+                    num_tries += 1
+
+            # Check num grasps.
+            num_grasps = len(grasps)
+            if num_grasps == 0:
+                self._logger.warning("No valid grasps could be found")
+                raise NoValidGraspsException()
+
+        # Predict final set of grasps.
+        q_values = self._grasp_quality_fn(state, grasps, params=self._config)
+        prior_features = self._grasp_quality_fn.get_features()
+        prior_features = (prior_features - self._feature_mean) / (self._feature_std)
+        prior_predictions = torch.from_numpy(np.array(q_values)).float().to(self._device)
+
+        # update q values
+        q_values, post_pos, post_neg = get_beta_posterior(
+            prior_features, prior_predictions,
+            self._likelihood_features, self._likelihood_labels,
+            prior_strength=self._prior_strength,
+            dist_scale=self._dist_scale,)
+        q_values = q_values.detach().cpu().numpy().tolist()
+        post_pos = post_pos.detach().cpu().numpy().tolist()
+        post_neg = post_neg.detach().cpu().numpy().tolist()
+
+        # stack
+        grasps_stack.append(grasps)
+        q_values_stack.append(q_values)
+        post_pos_stack.append(post_pos)
+        post_neg_stack.append(post_neg)
+        feature_stack.append(prior_features)
+
+        # visualize later
+        # self.visualize_progress(color_im, depth_im, grasps_stack, q_values_stack, feature_stack)
+
+        # merge stack to list
+        grasps = []
+        q_values = []
+        post_pos = []
+        post_neg = []
+        for i in range(len(grasps_stack)):
+            grasps += grasps_stack[i]
+            q_values += q_values_stack[i]
+            post_pos += post_pos_stack[i]
+            post_neg += post_neg_stack[i]
+        return grasps, q_values, post_pos, post_neg
+
+    def _action(self, state):
+        """Plans the grasp with the highest probability of success on
+        the given RGB-D image.
+
+        Attributes
+        ----------
+        state : :obj:`RgbdImageState`
+            Image to plan grasps on.
+
+        Returns
+        -------
+        :obj:`GraspAction`
+            Grasp to execute.
+        """
+        # Parse state.
+        rgbd_im = state.rgbd_im
+        depth_im = rgbd_im.depth
+        #        camera_intr = state.camera_intr
+        #        segmask = state.segmask
+
+        # Plan grasps.
+        grasps, q_values, post_pos, post_neg = self.action_set(state)
+
+        # Select grasp.
+        index = self.select(q_values, post_pos, post_neg)
+        grasp = grasps[index]
+        q_value = q_values[index]
+        if self.config["vis"]["grasp_plan"]:
+            title = "Best Grasp: d=%.3f, q=%.3f" % (grasp.depth, q_value)
+            vis.figure()
+            vis.imshow(depth_im,
+                       vmin=self.config["vis"]["vmin"],
+                       vmax=self.config["vis"]["vmax"])
+            vis.grasp(grasp,
+                      scale=5.0,
+                      show_center=False,
+                      show_axis=True,
+                      jaw_width=1.0,
+                      grasp_axis_width=0.2)
+            vis.title(title)
+            filename = None
+            if self._logging_dir is not None:
+                filename = os.path.join(self._logging_dir, "planned_grasp.png")
+            vis.show(filename)
+
+        # Form return image.
+        image = depth_im
+        if isinstance(self._grasp_quality_fn, GQCnnQualityFunction):
+            image_arr, _ = self._grasp_quality_fn.grasps_to_tensors([grasp],
+                                                                    state)
+            image = DepthImage(image_arr[0, ...], frame=rgbd_im.frame)
+        elif isinstance(self._grasp_quality_fn, PyTorchGQCnnQualityFunction):
+            image_arr, _ = self._grasp_quality_fn.grasps_to_tensors([grasp],
+                                                                    state)
+            image = DepthImage(image_arr[0, ...], frame=rgbd_im.frame)
+
+        # Return action.
+        action = GraspAction(grasp, q_value, image)
+        return action
+
+    def update(self, action, reward):
+        """Updates the policy.
+
+        Args:
+            action(GraspAction): the executed action.
+            reward(float): the reward received for executing the action.
+                1 is success, 0 is failure.
+        """
+        assert isinstance(action, GraspAction)
+
+        # augment data
+        tf_depth_ims = []
+        poses = []
+        if isinstance(action.grasp, Grasp2D):
+            # original
+            tf_depth_im = action.image.data
+            tf_depth_ims.append(tf_depth_im)
+            poses.append(action.grasp.depth)
+
+            # flip lr
+            tf_depth_ims.append(np.flip(tf_depth_im, axis=1))
+            poses.append(action.grasp.depth)
+
+            # flip ud
+            tf_depth_ims.append(np.flip(tf_depth_im, axis=0))
+            poses.append(action.grasp.depth)
+
+            # flip lr and ud
+            tf_depth_ims.append(np.flip(np.flip(tf_depth_im, axis=1), axis=0))
+            poses.append(action.grasp.depth)
+        elif isinstance(action.grasp, SuctionPoint2D):
+            # original
+            tf_depth_im = action.image.data
+            pose = [action.grasp.depth, action.grasp.approach_angle]
+            tf_depth_ims.append(tf_depth_im)
+            poses.append(pose)
+
+            # flip lr
+            tf_depth_ims.append(np.flip(tf_depth_im, axis=1))
+            pose = [action.grasp.depth, action.grasp.approach_angle]
+            poses.append(pose)
+
+            # flip ud
+            tf_depth_ims.append(np.flip(tf_depth_im, axis=0))
+            pose = [action.grasp.depth, -action.grasp.approach_angle]
+            poses.append(pose)
+
+            # flip lr and ud
+            tf_depth_ims.append(np.flip(np.flip(tf_depth_im, axis=1), axis=0))
+            pose = [action.grasp.depth, -action.grasp.approach_angle]
+            poses.append(pose)
+        else:
+            raise ValueError("Invalid grasp type: {}".format(type(action.grasp)))
+
+        # make tensors
+        tf_depth_ims = np.expand_dims(np.array(tf_depth_ims), axis=-1)
+        if isinstance(action.grasp, Grasp2D):
+            poses = np.expand_dims(np.array(poses), axis=-1)
+        elif isinstance(action.grasp, SuctionPoint2D):
+            poses = np.array(poses)
+
+        # forward pass
+        self._grasp_quality_fn._gqcnn.predict(tf_depth_ims, poses)
+
+        # get features
+        features = self._grasp_quality_fn.get_features()
+        features = (features - self._feature_mean) / self._feature_std
+
+        # update likelihood
+        if self._likelihood_features is None:
+            self._likelihood_features = features
+        else:
+            self._likelihood_features = torch.cat(
+                [self._likelihood_features, features], dim=0)
+
+        # update labels
+        labels = np.array([reward] * len(features), dtype=np.float32)
+        labels = torch.from_numpy(labels).float().to(self._device)
+        if self._likelihood_labels is None:
+            self._likelihood_labels = labels
+        else:
+            self._likelihood_labels = torch.cat(
+                [self._likelihood_labels, labels], dim=0)
+
+    def evaluate_action(self, actions):
+        """Computes the posterior from given actions.
+
+        Args:
+            actions (list of GraspAction): The list of executed actions. All actions must have
+                the same grasp type.
+
+        Returns:
+            posteriors (np.ndarray): (N, 1) array of posteriors.
+        """
+        if isinstance(actions[0].grasp, Grasp2D):
+            grasp_type = "parallel_jaw"
+        elif isinstance(actions[0].grasp, SuctionPoint2D):
+            grasp_type = "suction"
+
+        # make tensors
+        depth_tensors = []
+        pose_tensors = []
+        for action in actions:
+            if isinstance(action.grasp, Grasp2D):
+                if grasp_type != "parallel_jaw":
+                    raise ValueError("Grasp type mismatch")
+                depth_tensors.append(action.image.data)
+                pose_tensors.append([action.grasp.depth])
+            elif isinstance(action.grasp, SuctionPoint2D):
+                if grasp_type != "suction":
+                    raise ValueError("Grasp type mismatch")
+                depth_tensors.append(action.image.data)
+                pose_tensors.append([action.grasp.depth, action.grasp.approach_angle])
+            else:
+                raise ValueError("Invalid grasp type: {}".format(type(action.grasp)))
+        depth_tensors = np.expand_dims(np.array(depth_tensors), axis=-1)
+        pose_tensors = np.array(pose_tensors)
+
+        # forward pass
+        prior_predictions = self._grasp_quality_fn._gqcnn.predict(
+            depth_tensors, pose_tensors)[:, -1]
+        prior_predictions = torch.from_numpy(prior_predictions).float().to(self._device)
+        prior_features = self._grasp_quality_fn.get_features()
+        prior_features = (prior_features - self._feature_mean) / (self._feature_std)
+
+        # compute posterior
+        q_values, post_pos, post_neg = get_beta_posterior(
+            prior_features, prior_predictions,
+            self._likelihood_features, self._likelihood_labels,
+            prior_strength=self._prior_strength,
+            dist_scale=self._dist_scale)
+
+        posteriors = q_values.cpu().numpy()
+        return posteriors
+
+    def visualize_feature_map(self, show_features=False, save_path=None):
+        # update feature map
+        self._feature_map.reset()
+        if self._likelihood_features is not None:
+            self._feature_map.update_with_beta_posterior(
+                self._likelihood_features, self._likelihood_labels,
+                prior_strength=self._prior_strength,
+                dist_scale=self._dist_scale)
+        else:
+            print("No features to update feature map. So show prior.")
+
+        # plot feature map
+        fig = plt.figure(figsize=(10, 10))
+        ax = fig.add_subplot(111)
+        self._feature_map.plot(ax)
+
+        # plot features
+        if show_features is True and self._likelihood_features is not None:
+            features = self._likelihood_features.cpu().numpy()
+            labels = self._likelihood_labels.cpu().numpy()
+            ax.scatter(
+                features[:, 0], features[:, 1],
+                c=labels, cmap='bwr', vmin=0.0, vmax=1.0,
+                s=10, edgecolors='k', linewidths=0.5)
+
+        if save_path is not None:
+            plt.savefig(save_path)
+
+    def visualize_progress(self, color_im, depth_im, grasps_stack, q_values_stack, feature_stak):
+        # make subplots
+        fig = plt.figure(figsize=(20, 10))
+        feature_map_ax_list = [
+            fig.add_subplot(3, 4, i + 1) for i in range(4)]
+        color_ax_list = [
+            fig.add_subplot(3, 4, i + 5) for i in range(4)]
+        depth_ax_list = [
+            fig.add_subplot(3, 4, i + 9) for i in range(4)]
+
+        # plot feature map
+        for i in range(4):
+            self._feature_map.plot(feature_map_ax_list[i])
+
+        for i in range(4):
+            feature_map_ax_list[i].set_xlim(feature_map_ax_list[0].get_xlim())
+            feature_map_ax_list[i].set_ylim(feature_map_ax_list[0].get_ylim())
+
+        # plot depth and color image
+        for i in range(4):
+            color_grasp_img = color_im.data.copy()
+            for j in range(len(grasps_stack[i])):
+                if j > 0:
+                    break
+                self.label_grasp_on_image(
+                    color_grasp_img, grasps_stack[i][j], q_values_stack[i][j])
+            color_ax_list[i].imshow(color_grasp_img)
+            depth_ax_list[i].imshow(depth_im.raw_data)
+
+        # plot features on the feature map
+        num_stack = len(grasps_stack)
+        for i in range(num_stack):
+            grasps = grasps_stack[i]
+            q_values = q_values_stack[i]
+            features = feature_stak[i]
+
+            # convert to numpy
+            q_values = np.array(q_values)
+            features = features.detach().cpu().numpy()
+
+            # sort based on q values
+            sorted_idx = np.argsort(q_values)[::-1]
+            grasps = [grasps[i] for i in sorted_idx]
+            q_values = q_values[sorted_idx]
+            features = features[sorted_idx]
+
+            # plot features on feature map
+            # _feature = self._likelihood_features.clone().detach().cpu().numpy()
+            # _label = self._likelihood_labels.clone().detach().cpu().numpy()
+            # feature_map_ax_list[i].scatter(
+            #     _feature[:, 0], _feature[:, 1],
+            #     c=_label, cmap='bwr', s=20,
+            #     edgecolors='k', linewidths=1.0)
+            feature_map_ax_list[i].scatter(
+                features[:, 0], features[:, 1],
+                c=q_values, cmap='bwr', vmin=0.0, vmax=1.0,
+                s=20, edgecolors='k', linewidths=1.0)
+
+        plt.show()
+
+    def label_grasp_on_image(self, color_img, grasp, quality):
+        # Convert quality to color.
+        color_map = plt.get_cmap('bwr')
+        color = color_map(quality)
+        color = (int(color[0] * 255), int(color[1] * 255), int(color[2] * 255))
+
+        if isinstance(grasp, Grasp2D):
+            cp1_px, cp2_px = grasp.endpoints
+            center_px = (cp1_px + cp2_px) / 2.0
+            cp1_px = (int(cp1_px[0]), int(cp1_px[1]))
+            cp2_px = (int(cp2_px[0]), int(cp2_px[1]))
+            center_px = (int(center_px[0]), int(center_px[1]))
+            cv2.line(color_img, cp1_px, cp2_px, color, 2)
+            cv2.circle(color_img, center_px, 5, color, -1)
+        elif isinstance(grasp, SuctionPoint2D):
+            center_px = grasp.center.data
+            center_px = (int(center_px[0]), int(center_px[1]))
+            cv2.circle(color_img, center_px, 5, color, -1)

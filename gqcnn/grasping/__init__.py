@@ -31,7 +31,13 @@ from .constraint_fn import GraspConstraintFnFactory
 from .policy import (RobustGraspingPolicy, CrossEntropyRobustGraspingPolicy,
                      FullyConvolutionalGraspingPolicyParallelJaw,
                      FullyConvolutionalGraspingPolicySuction,
-                     UniformRandomGraspingPolicy, RgbdImageState, GraspAction)
+                     UniformRandomGraspingPolicy, RgbdImageState, GraspAction,
+
+                     # from here added by me
+                     GraspingPolicy,
+                     UCBThompsonSamplingGraspingPolicy,
+                     BetaProcessCrossEntropyRobustGraspingPolicy,
+                     )
 from .actions import (NoAction, ParallelJawGrasp3D, SuctionGrasp3D,
                       MultiSuctionGrasp3D)
 
@@ -43,5 +49,10 @@ __all__ = [
     "FullyConvolutionalGraspingPolicyParallelJaw",
     "FullyConvolutionalGraspingPolicySuction", "UniformRandomGraspingPolicy",
     "RgbdImageState", "GraspAction", "GraspConstraintFnFactory", "NoAction",
-    "ParallelJawGrasp3D", "SuctionGrasp3D", "MultiSuctionGrasp3D"
+    "ParallelJawGrasp3D", "SuctionGrasp3D", "MultiSuctionGrasp3D",
+
+    # from here added by me
+    "GraspingPolicy",
+    "UCBThompsonSamplingGraspingPolicy",
+    "BetaProcessCrossEntropyRobustGraspingPolicy",
 ]

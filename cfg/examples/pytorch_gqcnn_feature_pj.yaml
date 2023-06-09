@@ -40,11 +40,19 @@ policy:
   # metrics
   metric:
     type: pytorch_gqcnn
-    # gqcnn_model: models/PYTORCH-GQCNN-4.0-PJ
     gqcnn_model:
 
     crop_height: 96
     crop_width: 96
+
+  # feature
+  feature:
+    layer: merge_stream[-1]
+    data: sim/level_3-3/round_1-2
+    prior_strength: 1
+    dist_scale: 25
+    pos_neg_ratio: 0.5
+
 
   # visualization
   vis:

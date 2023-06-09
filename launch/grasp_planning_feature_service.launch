@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
+<!--
 Copyright ©2017. The Regents of the University of California (Regents).
 All Rights Reserved. Permission to use, copy, modify, and distribute this
 software and its documentation for educational, research, and not-for-profit
@@ -21,26 +20,18 @@ THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
 PURPOSE. THE SOFTWARE AND ACCOMPANYING DOCUMENTATION, IF ANY, PROVIDED
 HEREUNDER IS PROVIDED "AS IS". REGENTS HAS NO OBLIGATION TO PROVIDE
 MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
-"""
-from .fc_policy import (FullyConvolutionalGraspingPolicyParallelJaw,
-                        FullyConvolutionalGraspingPolicySuction)
-from .policy import (RobustGraspingPolicy, CrossEntropyRobustGraspingPolicy,
-                     RgbdImageState, GraspAction, UniformRandomGraspingPolicy,
+-->
 
-                     # from here added by me
-                     GraspingPolicy,
-                     UCBThompsonSamplingGraspingPolicy,
-                     BetaProcessCrossEntropyRobustGraspingPolicy,
-                     )
-
-__all__ = [
-    "FullyConvolutionalGraspingPolicyParallelJaw",
-    "FullyConvolutionalGraspingPolicySuction", "RobustGraspingPolicy",
-    "CrossEntropyRobustGraspingPolicy", "UniformRandomGraspingPolicy",
-    "RgbdImageState", "GraspAction",
-
-    # from here added by me
-    "GraspingPolicy",
-    "UCBThompsonSamplingGraspingPolicy",
-    "BetaProcessCrossEntropyRobustGraspingPolicy",
-]
+<launch>
+  <!-- Namespace for the node and services -->
+  <arg name="ns"  default="gqcnn" />
+  
+  <!-- Configuration file for Grasp Planner Node -->
+  <arg name="model_name"       default="" />
+  <arg name="model_dir"        default="default" />
+  
+  <node name="grasp_planner"  pkg="gqcnn_ros" type="grasp_planner_feature_node.py" ns="$(arg ns)" output="screen" >
+    	<param name="model_name"         value="$(arg model_name)" />
+    	<param name="model_dir"          value="$(arg model_dir)" />
+  </node>
+</launch>

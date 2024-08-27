@@ -1328,8 +1328,58 @@ class CrossEntropyRobustGraspingPolicy(GraspingPolicy):
         action = GraspAction(grasp, q_value, image)
         return action
 
+    ####################
+    # Custom Functions #
+    ####################
     def update(self, action, reward):
         pass
+
+    def save(self, *args):
+        pass
+
+    def evaluate_action(self, actions):
+        """Computes the q_values from given actions.
+
+        Args:
+            actions (list of GraspAction): The list of executed actions. All actions must have
+                the same grasp type.
+
+        Returns:
+            q_values (list of float): The q_values for each action.
+        """
+        if isinstance(actions[0].grasp, Grasp2D):
+            grasp_type = "parallel_jaw"
+        elif isinstance(actions[0].grasp, SuctionPoint2D):
+            grasp_type = "suction"
+
+        # make tensors
+        depth_tensors = []
+        pose_tensors = []
+        for action in actions:
+            if isinstance(action.grasp, Grasp2D):
+                if grasp_type != "parallel_jaw":
+                    raise ValueError("Grasp type mismatch")
+                depth_tensors.append(action.image.data)
+                pose_tensors.append([action.grasp.depth])
+            elif isinstance(action.grasp, SuctionPoint2D):
+                if grasp_type != "suction":
+                    raise ValueError("Grasp type mismatch")
+                depth_tensors.append(action.image.data)
+                pose_tensors.append([action.grasp.depth, action.grasp.approach_angle])
+            else:
+                raise ValueError("Invalid grasp type: {}".format(type(action.grasp)))
+        depth_tensors = np.expand_dims(np.array(depth_tensors), axis=-1)
+        pose_tensors = np.array(pose_tensors)
+
+        # forward pass
+        q_values = self._grasp_quality_fn._gqcnn.predict(
+            depth_tensors, pose_tensors)[:, -1]
+        return q_values
+
+    def get_features(self, actions):
+        self.evaluate_action(actions)
+        features = self._grasp_quality_fn.get_features()
+        return features
 
 
 class QFunctionRobustGraspingPolicy(CrossEntropyRobustGraspingPolicy):

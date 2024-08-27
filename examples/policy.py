@@ -35,6 +35,7 @@ import argparse
 import json
 import os
 import time
+import tensorflow as tf
 
 import numpy as np
 
@@ -249,6 +250,10 @@ if __name__ == "__main__":
             policy = CrossEntropyRobustGraspingPolicy(policy_config)
         else:
             raise ValueError("Invalid policy type: {}".format(policy_type))
+
+    assert isinstance(policy, CrossEntropyRobustGraspingPolicy)
+    print(policy._grasp_quality_fn.gqcnn)
+    print(tf.compat.v1.trainable_variables(policy._grasp_quality_fn.gqcnn))
 
     # Query policy.
     policy_start = time.time()

@@ -472,7 +472,15 @@ def run_grasp_planner_tf(model_name, model_dir, fully_conv, zivid_camera):
         else:
             config_filename = os.path.join(
                 os.path.dirname(os.path.realpath(__file__)), "..",
-                "cfg/examples/ros/gqcnn_pj.yaml")
+                "cfg/examples/ros/gqcnn_pj_5g.yaml")
+            rospy.logwarn("[grasp_planner_node.py] Using 5G parallel jaw config!")
+            rospy.logwarn("[grasp_planner_node.py] Using 5G parallel jaw config!")
+            rospy.logwarn("[grasp_planner_node.py] Using 5G parallel jaw config!")
+            rospy.logwarn("[grasp_planner_node.py] Using 5G parallel jaw config!")
+            rospy.logwarn("[grasp_planner_node.py] Using 5G parallel jaw config!")
+            rospy.logwarn("[grasp_planner_node.py] Using 5G parallel jaw config!")
+            rospy.logwarn("[grasp_planner_node.py] Using 5G parallel jaw config!")
+            rospy.logwarn("[grasp_planner_node.py] Using 5G parallel jaw config!")
 
     # Read config.
     cfg = YamlConfig(config_filename)

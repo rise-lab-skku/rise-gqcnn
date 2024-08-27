@@ -3,6 +3,9 @@ policy:
   num_seed_samples: 200
   num_gmm_samples: 50
   num_iters: 3
+  # num_seed_samples: 512
+  # num_gmm_samples: 128
+  # num_iters: 5
   gmm_refit_p: 0.25
   gmm_component_frac: 0.4
   gmm_reg_covar: 0.01

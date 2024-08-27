@@ -1329,7 +1329,8 @@ class PyTorchGQCnnQualityFunction(GraspQualityFunction):
         self._gqcnn_model_dir = config["gqcnn_model"]
         self._crop_height = config["crop_height"]
         self._crop_width = config["crop_width"]
-        self._feature_layer = 'merge_stream[-1]'
+        self._feature_layer = config["feature_layer"]
+        # self._feature_layer = 'merge_stream[-1]'
         print('\033[93m' + "[WARN] feature layer: merge_stram[-1]" + '\033[0m')
 
         # Init GQ-CNN
@@ -1351,6 +1352,10 @@ class PyTorchGQCnnQualityFunction(GraspQualityFunction):
             return activation
         elif layer_name == 'merge_stream[-1]':
             layer = model.merge_stream[-1]
+            layer.register_forward_hook(hook)
+            return activation
+        elif layer_name == 'head[-2]':
+            layer = model.head[-2]
             layer.register_forward_hook(hook)
             return activation
 
@@ -1452,7 +1457,7 @@ class PyTorchGQCnnQualityFunction(GraspQualityFunction):
             if 'return_tensor' in params.keys():
                 return_tensor = params['return_tensor']
 
-        # Form tensors.
+        # Form tensors. 
         tensor_start = time()
         image_tensor, pose_tensor = self.grasps_to_tensors(actions, state)
         self._logger.info("Image transformation took %.3f sec" %
@@ -1470,7 +1475,7 @@ class PyTorchGQCnnQualityFunction(GraspQualityFunction):
 
         return q_values.tolist()
 
-    def finetune(self, images, poses, labels, num_epoch, batch_size, lr, rehearsal_size=0):
+    def finetune(self, images, poses, labels, num_epoch, batch_size, lr, ewc_penalty=0.0):
         """Finetune the GQ-CNN on a set of images and labels.
 
         Parameters
@@ -1487,8 +1492,18 @@ class PyTorchGQCnnQualityFunction(GraspQualityFunction):
             Batch size to use for finetuning.
         lr : float
             Learning rate to use for finetuning.
-        rehearsal_size : int
-            Scale of rehearsal data to use for finetuning.
+        ewc_penalty : float
+            EWC penalty to use for finetuning.
         """
         for _ in range(num_epoch):
-            self._gqcnn.finetune(images, poses, labels, batch_size, lr, rehearsal_size)
+            self._gqcnn.finetune(images, poses, labels, batch_size, lr, ewc_penalty)
+
+    def save(self, save_path):
+        """Save the GQ-CNN to a directory.
+
+        Parameters
+        ----------
+        save_path : str
+            Path to save the model to. Should be a .pt file.
+        """
+        self._gqcnn.save(save_path)
